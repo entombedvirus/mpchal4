@@ -38,7 +38,7 @@ struct SortedFile {
 impl SortedFile {
     fn new(file_path: &str) -> Self {
         let f = fs::File::open(file_path).expect(&format!("failed to open: {file_path}"));
-        let reader = BufReader::new(f);
+        let reader = BufReader::with_capacity(1 << 20, f);
         let min_value = Vec::new();
 
         let mut ret = Self { min_value, reader };
