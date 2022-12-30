@@ -1,7 +1,7 @@
 use std::{
     collections::{binary_heap::PeekMut, BinaryHeap},
     env, fs,
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufRead, BufReader, BufWriter, Cursor, Write},
 };
 
 fn main() {
@@ -16,12 +16,12 @@ fn main() {
     }
 
     let output = fs::File::create("result.txt").expect("failed to create result.txt");
-    let mut output = BufWriter::with_capacity(2 << 20, output);
+    let mut output = BufWriter::new(output);
     while !input.is_empty() {
         let mut sorted_file = input.peek_mut().unwrap();
-        output
-            .write_all(&sorted_file.min_value)
-            .expect("failed to write line to result.txt");
+        // output
+        //     .write_all(&sorted_file.min_value)
+        //     .expect("failed to write line to result.txt");
 
         if !sorted_file.next_line() {
             PeekMut::<'_, SortedFile>::pop(sorted_file);
@@ -38,7 +38,7 @@ struct SortedFile {
 impl SortedFile {
     fn new(file_path: &str) -> Self {
         let f = fs::File::open(file_path).expect(&format!("failed to open: {file_path}"));
-        let reader = BufReader::with_capacity(1 << 20, f);
+        let reader = BufReader::new(f);
         let min_value = Vec::new();
 
         let mut ret = Self { min_value, reader };
