@@ -4,6 +4,8 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Cursor, Write},
 };
 
+use rustix::fs::MetadataExt;
+
 fn main() {
     let mut input: BinaryHeap<_> = env::args()
         .skip(1)
@@ -11,8 +13,10 @@ fn main() {
         .collect();
 
     if input.is_empty() {
-        input.push(SortedFile::new("files/2m.txt"));
-        input.push(SortedFile::new("files/4m.txt"));
+        for pat in ["2", "4", "8", "10", "20", "40"] {
+            let path = format!("files/{pat}m.txt");
+            input.push(SortedFile::new(&path));
+        }
     }
 
     let output = fs::File::create("result.txt").expect("failed to create result.txt");
@@ -38,6 +42,14 @@ struct SortedFile {
 impl SortedFile {
     fn new(file_path: &str) -> Self {
         let f = fs::File::open(file_path).expect(&format!("failed to open: {file_path}"));
+        rustix::fs::fadvise(
+            &f,
+            0,
+            f.metadata().unwrap().size(),
+            rustix::fs::Advice::Sequential,
+        )
+        .expect("fadvice failed");
+
         let reader = BufReader::new(f);
         let min_value = Vec::new();
 
