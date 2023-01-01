@@ -9,4 +9,6 @@ debug = 1
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+libc = "0.2.139"
+rio = "0.9.4"
 rustix = { version = "0.36.6", features = ["default", "fs"] }
