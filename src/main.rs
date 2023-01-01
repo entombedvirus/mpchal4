@@ -1,7 +1,7 @@
 use std::{
     collections::{binary_heap::PeekMut, BinaryHeap},
     env, fs,
-    io::{BufRead, BufReader, BufWriter, Cursor, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
 };
 
 use rustix::fs::MetadataExt;
@@ -19,13 +19,25 @@ fn main() {
         }
     }
 
+    let mut expected_file_size = 0;
+    for file in &input {
+        expected_file_size += file.file_size;
+    }
     let output = fs::File::create("result.txt").expect("failed to create result.txt");
+    rustix::fs::fallocate(
+        &output,
+        rustix::fs::FallocateFlags::KEEP_SIZE,
+        0,
+        expected_file_size,
+    )
+    .expect("fallocate failed");
+
     let mut output = BufWriter::new(output);
     while !input.is_empty() {
         let mut sorted_file = input.peek_mut().unwrap();
-        // output
-        //     .write_all(&sorted_file.min_value)
-        //     .expect("failed to write line to result.txt");
+        output
+            .write_all(&sorted_file.min_value)
+            .expect("failed to write line to result.txt");
 
         if !sorted_file.next_line() {
             PeekMut::<'_, SortedFile>::pop(sorted_file);
@@ -37,23 +49,24 @@ fn main() {
 struct SortedFile {
     min_value: Vec<u8>,
     reader: BufReader<fs::File>,
+    file_size: u64,
 }
 
 impl SortedFile {
     fn new(file_path: &str) -> Self {
         let f = fs::File::open(file_path).expect(&format!("failed to open: {file_path}"));
-        rustix::fs::fadvise(
-            &f,
-            0,
-            f.metadata().unwrap().size(),
-            rustix::fs::Advice::Sequential,
-        )
-        .expect("fadvice failed");
+        let file_size = f.metadata().unwrap().size();
+        rustix::fs::fadvise(&f, 0, file_size, rustix::fs::Advice::Sequential)
+            .expect("fadvice failed");
 
         let reader = BufReader::new(f);
         let min_value = Vec::new();
 
-        let mut ret = Self { min_value, reader };
+        let mut ret = Self {
+            min_value,
+            reader,
+            file_size,
+        };
         ret.next_line();
         ret
     }
