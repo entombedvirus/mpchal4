@@ -22,9 +22,10 @@ fn new_buf() -> Buf {
 }
 
 pub struct File {
-    buf: Buf,
+    cur_buf: Buf,
     io_chan: Option<mpsc::Sender<Buf>>,
     worker: Option<std::thread::JoinHandle<()>>,
+    buf_pool: mpsc::Receiver<Buf>,
 }
 
 impl File {
@@ -46,6 +47,8 @@ impl File {
 
         let (send, recv) = mpsc::channel();
         let io_chan: Option<mpsc::Sender<Buf>> = Some(send.clone());
+
+        let (buf_pool_send, buf_pool_recv) = mpsc::channel();
 
         let worker = std::thread::spawn(move || {
             let mut off = 0_usize;
@@ -71,6 +74,10 @@ impl File {
                     .write_all_at(&buf[..buf_len], off as u64)
                     .expect("worker: write_all_at failed");
                 off += buf_len;
+
+                if let Err(err) = buf_pool_send.send(Cursor::new(buf)) {
+                    eprintln!("failed to send buf back in pool: {err}");
+                }
             }
 
             // truncate file to expected size since we might've
@@ -80,26 +87,27 @@ impl File {
 
         Self {
             io_chan,
-            buf: new_buf(),
+            cur_buf: new_buf(),
             worker: Some(worker),
+            buf_pool: buf_pool_recv,
         }
     }
 
     pub fn write_bytes(&mut self, mut line: &[u8]) -> io::Result<()> {
-        let buf = self.buf.get_ref();
-        let cap = buf.len() - self.buf.position() as usize;
+        let buf = self.cur_buf.get_ref();
+        let cap = buf.len() - self.cur_buf.position() as usize;
         if cap < line.len() {
             let (partial, rem) = line.split_at(cap);
             line = rem;
             assert_eq!(
-                self.buf.write(partial).unwrap(),
+                self.cur_buf.write(partial).unwrap(),
                 partial.len(),
                 "write_bytes: partial: short write"
             );
             self.flush().expect("write_bytes: flush failed");
         }
         assert_eq!(
-            self.buf.write(line).unwrap(),
+            self.cur_buf.write(line).unwrap(),
             line.len(),
             "write_bytes: short write"
         );
@@ -107,11 +115,15 @@ impl File {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if self.buf.position() == 0 {
+        if self.cur_buf.position() == 0 {
             return Ok(());
         }
 
-        let cur = std::mem::replace(&mut self.buf, new_buf());
+        let new_buf_to_use = match self.buf_pool.try_recv() {
+            Ok(buf) => buf,
+            Err(_) => new_buf(),
+        };
+        let cur = std::mem::replace(&mut self.cur_buf, new_buf_to_use);
         self.io_chan.as_ref().unwrap().send(cur).unwrap();
         Ok(())
     }
