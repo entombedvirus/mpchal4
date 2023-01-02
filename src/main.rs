@@ -138,7 +138,7 @@ impl SortedFile {
 
 impl Ord for SortedFile {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        ascii_number_cmp(&self.min_value, &other.min_value).reverse()
+        ascii_number_cmp(&self.min_value[4..], &other.min_value[4..]).reverse()
     }
 }
 
