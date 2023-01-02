@@ -92,13 +92,20 @@ impl SortedFile {
 
             // perf: eliminate unnecessary bounds check
             // SAFETY: we guarantee that self.pos is always a valid index into aligned buf
-            let mut buf = unsafe { self.aligned_buf.get_unchecked(self.pos..self.filled) };
-            let n = buf
-                .read_until(b'\n', &mut self.min_value)
-                .expect("failed to read subsequent line");
-            self.pos += n;
-            if self.min_value.last() == Some(&b'\n') {
-                break true;
+            let buf = unsafe { self.aligned_buf.get_unchecked(self.pos..self.filled) };
+            match memchr::memchr(b'\n', buf) {
+                Some(mut n) => {
+                    // we want to include the newline
+                    n += 1;
+                    self.min_value.extend_from_slice(&buf[..n]);
+                    self.pos += n;
+                    break true;
+                }
+                None => {
+                    self.min_value.extend_from_slice(buf);
+                    self.pos += buf.len();
+                    continue;
+                }
             }
         };
 
