@@ -4,7 +4,7 @@ use std::{
     io::{BufRead, BufReader, Read},
 };
 
-use rustix::fs::MetadataExt;
+use rustix::fs::{MetadataExt, OpenOptionsExt};
 mod iodirect;
 
 fn main() {
@@ -52,7 +52,11 @@ struct SortedFile {
 
 impl SortedFile {
     fn new(file_path: &str) -> Self {
-        let reader = fs::File::open(file_path).expect(&format!("failed to open: {file_path}"));
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(file_path)
+            .expect("failed to open input");
         let file_size = reader.metadata().unwrap().size();
 
         let aligned_buf = unsafe {
