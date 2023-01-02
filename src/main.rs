@@ -2,6 +2,7 @@ use std::{
     collections::{binary_heap::PeekMut, BinaryHeap},
     env, fs,
     io::{BufRead, BufReader},
+    sync::mpsc,
 };
 
 use rustix::fs::MetadataExt;
@@ -41,9 +42,16 @@ fn main() {
 #[derive(Debug)]
 struct SortedFile {
     min_value: Vec<u8>,
-    reader: BufReader<fs::File>,
     file_size: u64,
+
+    cur_batch_iter: std::vec::IntoIter<Vec<u8>>,
+
+    lines: Option<mpsc::Receiver<LineBatch>>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
+
+const LINEZ_BATCH_SIZE: usize = 100_000;
+type LineBatch = Vec<Vec<u8>>;
 
 impl SortedFile {
     fn new(file_path: &str) -> Self {
@@ -52,30 +60,80 @@ impl SortedFile {
         rustix::fs::fadvise(&f, 0, file_size, rustix::fs::Advice::Sequential)
             .expect("fadvice failed");
 
-        let reader = BufReader::new(f);
-        let min_value = Vec::new();
+        let (tx, rx) = mpsc::sync_channel(10);
+        let worker = std::thread::spawn(move || {
+            let mut reader = BufReader::new(f);
+            let mut batch = Vec::with_capacity(LINEZ_BATCH_SIZE);
 
+            loop {
+                let mut line = vec![];
+                let n = reader
+                    .read_until(b'\n', &mut line)
+                    .expect("worker: failed to read line");
+                if n == 0 {
+                    // EOF
+                    break;
+                }
+                // normalize all lines with a trailing new line so that
+                // ascii comparison works
+                if line.last() != Some(&b'\n') {
+                    line.push(b'\n');
+                }
+                batch.push(line);
+                if batch.len() == batch.capacity() {
+                    if let Err(_) = tx.send(std::mem::replace(
+                        &mut batch,
+                        Vec::with_capacity(LINEZ_BATCH_SIZE),
+                    )) {
+                        break;
+                    }
+                }
+            }
+
+            if batch.len() > 0 {
+                let _ = tx.send(batch);
+            }
+        });
+
+        let min_value = Vec::new();
         let mut ret = Self {
             min_value,
-            reader,
             file_size,
+            worker: Some(worker),
+            lines: Some(rx),
+            cur_batch_iter: vec![].into_iter(),
         };
         ret.next_line();
         ret
     }
 
     pub fn next_line(&mut self) -> bool {
-        self.min_value.clear();
-        let n = self
-            .reader
-            .read_until(b'\n', &mut self.min_value)
-            .expect("failed to read subsequent line");
-        // normalize all lines with a trailing new line so that
-        // ascii comparison works
-        if n > 0 && self.min_value.last() != Some(&b'\n') {
-            self.min_value.push(b'\n');
+        loop {
+            if let Some(line) = self.cur_batch_iter.next() {
+                self.min_value = line;
+                break true;
+            } else {
+                match self.lines.as_ref().unwrap().recv() {
+                    Ok(batch) => {
+                        self.cur_batch_iter = batch.into_iter();
+                        continue;
+                    }
+                    Err(_) => break false,
+                }
+            }
         }
-        n > 0
+    }
+}
+
+impl Drop for SortedFile {
+    fn drop(&mut self) {
+        // signal exit to worker
+        drop(self.lines.take());
+        self.worker
+            .take()
+            .unwrap()
+            .join()
+            .expect("worker thread panicked");
     }
 }
 
