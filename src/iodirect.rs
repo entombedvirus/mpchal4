@@ -1,8 +1,6 @@
 use std::{
-    collections::{LinkedList, VecDeque},
     fs,
     io::{self, Cursor, Write},
-    rc::Rc,
     sync::mpsc,
 };
 
@@ -11,15 +9,16 @@ use rustix::fs::{FileExt, OpenOptionsExt};
 const CHUNK_SIZE: usize = 1 << 20;
 const ALIGN: usize = 4096;
 
-type Buf = Cursor<Vec<u8>>;
+type Buf = Cursor<Box<[u8]>>;
 
 fn new_buf() -> Buf {
     let layout = std::alloc::Layout::from_size_align(CHUNK_SIZE, ALIGN).unwrap();
-    let vec = unsafe {
+    let boxed_slice = unsafe {
         let ptr = std::alloc::alloc_zeroed(layout);
-        std::vec::Vec::from_raw_parts(ptr, 0, CHUNK_SIZE)
+        let slice = std::slice::from_raw_parts_mut(ptr, CHUNK_SIZE);
+        Box::from_raw(slice)
     };
-    Cursor::new(vec)
+    Cursor::new(boxed_slice)
 }
 
 pub struct File {
@@ -52,7 +51,7 @@ impl File {
             let mut off = 0_usize;
             let mut padn = 0_usize;
             for buf in recv {
-                let buf_len = buf.position() as usize;
+                let mut buf_len = buf.position() as usize;
                 let mut buf = buf.into_inner();
                 if buf_len % ALIGN != 0 {
                     // this happens on the very last write
@@ -62,17 +61,16 @@ impl File {
                     );
                     padn = ALIGN - buf_len % ALIGN;
                     assert!(
-                        buf.len() + padn <= buf.capacity(),
+                        buf_len + padn <= buf.len(),
                         "buf will resize, which will destroy alignment guarantees"
                     );
-                    for _ in 0..padn {
-                        buf.push(0_u8);
-                    }
+                    buf[buf_len..buf_len + padn].fill(0_u8);
+                    buf_len += padn;
                 }
                 inner
-                    .write_all_at(&buf, off as u64)
+                    .write_all_at(&buf[..buf_len], off as u64)
                     .expect("worker: write_all_at failed");
-                off += buf.len();
+                off += buf_len;
             }
 
             // truncate file to expected size since we might've
@@ -89,7 +87,7 @@ impl File {
 
     pub fn write_bytes(&mut self, mut line: &[u8]) -> io::Result<()> {
         let buf = self.buf.get_ref();
-        let cap = buf.capacity() - self.buf.position() as usize;
+        let cap = buf.len() - self.buf.position() as usize;
         if cap < line.len() {
             let (partial, rem) = line.split_at(cap);
             line = rem;
