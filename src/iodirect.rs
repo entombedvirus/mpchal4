@@ -7,7 +7,7 @@ use std::{
 use rustix::fs::{FileExt, OpenOptionsExt};
 
 const CHUNK_SIZE: usize = 1 << 20;
-const ALIGN: usize = 4096;
+pub const ALIGN: usize = 4096;
 
 type Buf = Cursor<Box<[u8]>>;
 

@@ -1,7 +1,7 @@
 use std::{
     collections::{binary_heap::PeekMut, BinaryHeap},
     env, fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
 };
 
 use rustix::fs::MetadataExt;
@@ -40,42 +40,88 @@ fn main() {
 
 #[derive(Debug)]
 struct SortedFile {
-    min_value: Vec<u8>,
-    reader: BufReader<fs::File>,
     file_size: u64,
+
+    min_value: Vec<u8>,
+
+    reader: fs::File,
+    aligned_buf: Box<[u8]>,
+    pos: usize,
+    filled: usize,
 }
 
 impl SortedFile {
     fn new(file_path: &str) -> Self {
-        let f = fs::File::open(file_path).expect(&format!("failed to open: {file_path}"));
-        let file_size = f.metadata().unwrap().size();
-        rustix::fs::fadvise(&f, 0, file_size, rustix::fs::Advice::Sequential)
-            .expect("fadvice failed");
+        let reader = fs::File::open(file_path).expect(&format!("failed to open: {file_path}"));
+        let file_size = reader.metadata().unwrap().size();
 
-        let reader = BufReader::new(f);
+        let aligned_buf = unsafe {
+            const SZ: usize = 1 << 20;
+            let layout = std::alloc::Layout::from_size_align(SZ, iodirect::ALIGN).unwrap();
+            let ptr = std::alloc::alloc_zeroed(layout);
+            let slice = std::slice::from_raw_parts_mut(ptr, SZ);
+            Box::from_raw(slice)
+        };
+
         let min_value = Vec::new();
 
         let mut ret = Self {
+            file_size,
             min_value,
             reader,
-            file_size,
+            aligned_buf,
+            pos: 0,
+            filled: 0,
         };
+
         ret.next_line();
         ret
     }
 
     pub fn next_line(&mut self) -> bool {
         self.min_value.clear();
-        let n = self
-            .reader
-            .read_until(b'\n', &mut self.min_value)
-            .expect("failed to read subsequent line");
-        // normalize all lines with a trailing new line so that
-        // ascii comparison works
-        if n > 0 && self.min_value.last() != Some(&b'\n') {
+        let found = loop {
+            let avail = self.fill_buf();
+            if avail == 0 {
+                break false;
+            }
+
+            // perf: eliminate unnecessary bounds check
+            // SAFETY: we guarantee that self.pos is always a valid index into aligned buf
+            let mut buf = unsafe { self.aligned_buf.get_unchecked(self.pos..self.filled) };
+            let n = buf
+                .read_until(b'\n', &mut self.min_value)
+                .expect("failed to read subsequent line");
+            self.pos += n;
+            if self.min_value.last() == Some(&b'\n') {
+                break true;
+            }
+        };
+
+        if found {
+            return true;
+        }
+
+        let done = self.min_value.is_empty();
+        if !done {
+            // last line is missing newline: normalize so that higher layers can always
+            // rely on the fact that there will be a newline at the end
             self.min_value.push(b'\n');
         }
-        n > 0
+        !done
+    }
+
+    fn fill_buf(&mut self) -> usize {
+        if self.pos >= self.filled {
+            debug_assert_eq!(self.pos, self.filled);
+            let n = self
+                .reader
+                .read(&mut self.aligned_buf)
+                .expect("failed to read form file");
+            self.pos = 0;
+            self.filled = n;
+        }
+        self.filled - self.pos
     }
 }
 
