@@ -1,10 +1,11 @@
 use std::{
     collections::{binary_heap::PeekMut, BinaryHeap},
     env, fs,
-    io::{BufRead, BufReader, Cursor, Write},
+    io::{BufRead, BufReader},
 };
 
 use rustix::fs::MetadataExt;
+mod iodirect;
 
 fn main() {
     let mut input: BinaryHeap<_> = env::args()
@@ -23,69 +24,18 @@ fn main() {
     for file in &input {
         expected_file_size += file.file_size;
     }
-    // let output = fs::File::create("result.txt").expect("failed to create result.txt");
 
-    // let mut output = BufWriter::new(output);
-    // start the ring
-    let ring = rio::new().expect("io_uring failed");
-
-    // open output file, with `O_DIRECT` set
-    let output = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        // .custom_flags(libc::O_DIRECT)
-        .open("result.txt")
-        .expect("failed to create result.txt");
-
-    rustix::fs::fallocate(
-        &output,
-        rustix::fs::FallocateFlags::KEEP_SIZE,
-        0,
-        expected_file_size,
-    )
-    .expect("fallocate failed");
-
-    let out_buf = Aligned([0; CHUNK_SIZE as usize]);
-    let mut buf = Cursor::new(out_buf.0);
-    // let mut completions = vec![];
-    let mut wr: usize = 0;
-
-    let mut flush = |buf: &mut Cursor<[u8; CHUNK_SIZE as usize]>| {
-        // no room left; must flush
-        let inner = buf.get_ref();
-        let to_write = &inner[0..buf.position() as usize];
-        if to_write.len() == 0 {
-            return;
-        }
-        let op = ring.write_at(&output, &to_write, wr as u64);
-        // completions.push(op);
-        let res = op.wait().expect("write_at submit failed");
-        // check for short writes
-        assert_eq!(res, to_write.len());
-        wr += res;
-        buf.set_position(0);
-    };
+    let mut output = iodirect::File::new("result.txt", expected_file_size as usize);
 
     while !input.is_empty() {
         let mut sorted_file = input.peek_mut().unwrap();
-        let len = sorted_file.min_value.len();
-
-        let cap = buf.get_ref().len() - buf.position() as usize;
-        if cap < len {
-            flush(&mut buf);
-        }
-        assert_eq!(buf.write(&sorted_file.min_value).unwrap(), len);
-
-        // output
-        //     .write_all(&sorted_file.min_value)
-        //     .expect("failed to write line to result.txt");
-
+        output
+            .write_bytes(&sorted_file.min_value)
+            .expect("output.write_bytes failed");
         if !sorted_file.next_line() {
             PeekMut::<'_, SortedFile>::pop(sorted_file);
         }
     }
-    flush(&mut buf);
 }
 
 #[derive(Debug)]
@@ -154,10 +104,6 @@ fn ascii_number_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
         res => res,
     }
 }
-
-const CHUNK_SIZE: u64 = 4096 * 256;
-#[repr(align(4096))]
-struct Aligned([u8; CHUNK_SIZE as usize]);
 
 #[cfg(test)]
 mod tests {
