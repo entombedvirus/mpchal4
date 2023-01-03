@@ -48,7 +48,7 @@ struct SortedFile {
     file_size: u64,
 
     newline_idx: Option<usize>,
-    parsed_min_value: Option<u64>,
+    parsed_min_value: u64,
     partial_line: Option<Vec<u8>>,
 
     reader: fs::File,
@@ -77,7 +77,7 @@ impl SortedFile {
         let mut ret = Self {
             file_size,
             newline_idx: None,
-            parsed_min_value: None,
+            parsed_min_value: 0,
             partial_line: None,
             reader,
             aligned_buf,
@@ -164,31 +164,12 @@ impl SortedFile {
     }
 }
 
-impl Ord for SortedFile {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // ascii_number_cmp(&self.min_value, &other.min_value).reverse()
-        self.parsed_min_value.cmp(&other.parsed_min_value)
-    }
-}
-
-impl PartialOrd for SortedFile {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for SortedFile {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == std::cmp::Ordering::Equal
-    }
-}
-impl Eq for SortedFile {}
-
-fn parse_num_with_newline(digits: &[u8]) -> Option<u64> {
+fn parse_num_with_newline(digits: &[u8]) -> u64 {
     // ignore empty and just newline char
-    if digits.len() < 2 {
-        return None;
-    }
+    assert!(
+        digits.len() > 1,
+        "expecting at least one digit plus newline"
+    );
 
     let mut res: u64 = 0;
     for &c in &digits[..digits.len() - 1] {
@@ -196,7 +177,7 @@ fn parse_num_with_newline(digits: &[u8]) -> Option<u64> {
         let digit = (c as u64) - '0' as u64;
         res += digit;
     }
-    Some(res)
+    res
 }
 
 #[cfg(test)]
