@@ -10,13 +10,13 @@ mod iodirect;
 fn main() {
     let mut input: BinaryHeap<_> = env::args()
         .skip(1)
-        .map(|input_file| SortedFile::new(&input_file))
+        .map(|input_file| Box::new(SortedFile::new(&input_file)))
         .collect();
 
     if input.is_empty() {
         for pat in ["2", "4", "8", "10", "20", "40"] {
             let path = format!("files/{pat}m.txt");
-            input.push(SortedFile::new(&path));
+            input.push(Box::new(SortedFile::new(&path)));
         }
     }
 
@@ -33,7 +33,7 @@ fn main() {
             .write_bytes(&sorted_file.min_value)
             .expect("output.write_bytes failed");
         if !sorted_file.next_line() {
-            PeekMut::<'_, SortedFile>::pop(sorted_file);
+            PeekMut::<'_, Box<SortedFile>>::pop(sorted_file);
         }
     }
 }
@@ -136,24 +136,24 @@ impl SortedFile {
     }
 }
 
-impl Ord for SortedFile {
+impl Ord for Box<SortedFile> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         ascii_number_cmp(&self.min_value, &other.min_value).reverse()
     }
 }
 
-impl PartialOrd for SortedFile {
+impl PartialOrd for Box<SortedFile> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for SortedFile {
+impl PartialEq for Box<SortedFile> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
-impl Eq for SortedFile {}
+impl Eq for Box<SortedFile> {}
 
 fn ascii_number_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     match a.len().cmp(&b.len()) {
