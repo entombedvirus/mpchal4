@@ -86,7 +86,6 @@ impl SortedFile {
 
     pub fn next_line(&mut self) -> bool {
         self.min_value.clear();
-        self.parsed_min_value.take();
 
         let found = loop {
             let avail = self.fill_buf();
@@ -113,26 +112,14 @@ impl SortedFile {
             }
         };
 
-        self.parsed_min_value = unsafe {
-            if self.min_value.is_empty() {
-                None
-            } else {
-                parse_num(&self.min_value[..self.min_value.len() - 1])
-                // let str =
-                //     std::str::from_utf8_unchecked(&self.min_value[..self.min_value.len() - 1]);
-                // str.parse().ok()
-            }
-        };
-        if found {
-            return true;
-        }
-
         let done = self.min_value.is_empty();
-        if !done {
+        if !done && !found {
             // last line is missing newline: normalize so that higher layers can always
             // rely on the fact that there will be a newline at the end
             self.min_value.push(b'\n');
         }
+
+        self.parsed_min_value = parse_num_with_newline(&self.min_value);
         !done
     }
 
@@ -170,20 +157,14 @@ impl PartialEq for Box<SortedFile> {
 }
 impl Eq for Box<SortedFile> {}
 
-fn ascii_number_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
-    match a.len().cmp(&b.len()) {
-        std::cmp::Ordering::Equal => a.cmp(b),
-        res => res,
-    }
-}
-
-fn parse_num(digits: &[u8]) -> Option<u64> {
-    if digits.is_empty() {
+fn parse_num_with_newline(digits: &[u8]) -> Option<u64> {
+    // ignore empty and just newline char
+    if digits.len() < 2 {
         return None;
     }
 
     let mut res: u64 = 0;
-    for &c in digits {
+    for &c in &digits[..digits.len() - 1] {
         res *= 10;
         let digit = (c as u64) - '0' as u64;
         res += digit;
