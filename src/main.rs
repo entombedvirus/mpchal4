@@ -43,6 +43,7 @@ struct SortedFile {
     file_size: u64,
 
     min_value: Vec<u8>,
+    parsed_min_value: Option<u64>,
 
     reader: fs::File,
     aligned_buf: Box<[u8]>,
@@ -72,6 +73,7 @@ impl SortedFile {
         let mut ret = Self {
             file_size,
             min_value,
+            parsed_min_value: None,
             reader,
             aligned_buf,
             pos: 0,
@@ -84,6 +86,8 @@ impl SortedFile {
 
     pub fn next_line(&mut self) -> bool {
         self.min_value.clear();
+        self.parsed_min_value.take();
+
         let found = loop {
             let avail = self.fill_buf();
             if avail == 0 {
@@ -109,6 +113,16 @@ impl SortedFile {
             }
         };
 
+        self.parsed_min_value = unsafe {
+            if self.min_value.is_empty() {
+                None
+            } else {
+                parse_num(&self.min_value[..self.min_value.len() - 1])
+                // let str =
+                //     std::str::from_utf8_unchecked(&self.min_value[..self.min_value.len() - 1]);
+                // str.parse().ok()
+            }
+        };
         if found {
             return true;
         }
@@ -138,7 +152,8 @@ impl SortedFile {
 
 impl Ord for Box<SortedFile> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        ascii_number_cmp(&self.min_value, &other.min_value).reverse()
+        // ascii_number_cmp(&self.min_value, &other.min_value).reverse()
+        self.parsed_min_value.cmp(&other.parsed_min_value).reverse()
     }
 }
 
@@ -160,6 +175,20 @@ fn ascii_number_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
         std::cmp::Ordering::Equal => a.cmp(b),
         res => res,
     }
+}
+
+fn parse_num(digits: &[u8]) -> Option<u64> {
+    if digits.is_empty() {
+        return None;
+    }
+
+    let mut res: u64 = 0;
+    for &c in digits {
+        res *= 10;
+        let digit = (c as u64) - '0' as u64;
+        res += digit;
+    }
+    Some(res)
 }
 
 #[cfg(test)]
