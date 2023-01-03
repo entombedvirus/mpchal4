@@ -1,22 +1,18 @@
-use std::{
-    collections::{binary_heap::PeekMut, BinaryHeap},
-    env, fs,
-    io::Read,
-};
+use std::{env, fs, io::Read};
 
 use rustix::fs::{MetadataExt, OpenOptionsExt};
 mod iodirect;
 
 fn main() {
-    let mut input: BinaryHeap<_> = env::args()
+    let mut input: Vec<_> = env::args()
         .skip(1)
-        .map(|input_file| Box::new(SortedFile::new(&input_file)))
+        .map(|input_file| SortedFile::new(&input_file))
         .collect();
 
     if input.is_empty() {
         for pat in ["2", "4", "8", "10", "20", "40"] {
             let path = format!("files/{pat}m.txt");
-            input.push(Box::new(SortedFile::new(&path)));
+            input.push(SortedFile::new(&path));
         }
     }
 
@@ -27,15 +23,24 @@ fn main() {
 
     let mut output = iodirect::File::new("result.txt", expected_file_size as usize);
 
-    while !input.is_empty() {
-        let mut sorted_file = input.peek_mut().unwrap();
+    while let Some(idx) = find_min(&input) {
+        let sorted_file = &mut input[idx];
         output
             .write_bytes(sorted_file.min_value())
             .expect("output.write_bytes failed");
         if !sorted_file.next_line() {
-            PeekMut::<'_, Box<SortedFile>>::pop(sorted_file);
+            // PeekMut::<'_, SortedFile>::pop(sorted_file);
+            input.swap_remove(idx);
         }
     }
+}
+
+fn find_min(files: &[SortedFile]) -> Option<usize> {
+    files
+        .iter()
+        .enumerate()
+        .min_by_key(|&(_, file)| file.parsed_min_value)
+        .map(|(idx, _)| idx)
 }
 
 #[derive(Debug)]
@@ -159,25 +164,25 @@ impl SortedFile {
     }
 }
 
-impl Ord for Box<SortedFile> {
+impl Ord for SortedFile {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // ascii_number_cmp(&self.min_value, &other.min_value).reverse()
-        self.parsed_min_value.cmp(&other.parsed_min_value).reverse()
+        self.parsed_min_value.cmp(&other.parsed_min_value)
     }
 }
 
-impl PartialOrd for Box<SortedFile> {
+impl PartialOrd for SortedFile {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for Box<SortedFile> {
+impl PartialEq for SortedFile {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
-impl Eq for Box<SortedFile> {}
+impl Eq for SortedFile {}
 
 fn parse_num_with_newline(digits: &[u8]) -> Option<u64> {
     // ignore empty and just newline char
