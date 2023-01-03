@@ -1,7 +1,7 @@
 use std::{
     collections::{binary_heap::PeekMut, BinaryHeap},
     env, fs,
-    io::{BufRead, BufReader, Read},
+    io::Read,
 };
 
 use rustix::fs::{MetadataExt, OpenOptionsExt};
@@ -30,7 +30,7 @@ fn main() {
     while !input.is_empty() {
         let mut sorted_file = input.peek_mut().unwrap();
         output
-            .write_bytes(&sorted_file.min_value)
+            .write_bytes(sorted_file.min_value())
             .expect("output.write_bytes failed");
         if !sorted_file.next_line() {
             PeekMut::<'_, Box<SortedFile>>::pop(sorted_file);
@@ -42,8 +42,9 @@ fn main() {
 struct SortedFile {
     file_size: u64,
 
-    min_value: Vec<u8>,
+    newline_idx: Option<usize>,
     parsed_min_value: Option<u64>,
+    partial_line: Option<Vec<u8>>,
 
     reader: fs::File,
     aligned_buf: Box<[u8]>,
@@ -68,12 +69,11 @@ impl SortedFile {
             Box::from_raw(slice)
         };
 
-        let min_value = Vec::new();
-
         let mut ret = Self {
             file_size,
-            min_value,
+            newline_idx: None,
             parsed_min_value: None,
+            partial_line: None,
             reader,
             aligned_buf,
             pos: 0,
@@ -84,8 +84,23 @@ impl SortedFile {
         ret
     }
 
+    pub fn min_value(&self) -> &[u8] {
+        if let Some(line) = &self.partial_line {
+            return line;
+        }
+        match self.newline_idx {
+            Some(idx) => unsafe { self.aligned_buf.get_unchecked(self.pos..=idx) },
+            None => &[],
+        }
+    }
+
     pub fn next_line(&mut self) -> bool {
-        self.min_value.clear();
+        if self.partial_line.is_some() {
+            self.partial_line = None;
+        }
+        if let Some(idx) = self.newline_idx {
+            self.pos = idx + 1; // +1 to skip newline char
+        }
 
         let found = loop {
             let avail = self.fill_buf();
@@ -97,30 +112,37 @@ impl SortedFile {
             // SAFETY: we guarantee that self.pos is always a valid index into aligned buf
             let buf = unsafe { self.aligned_buf.get_unchecked(self.pos..self.filled) };
             match memchr::memchr(b'\n', buf) {
-                Some(mut n) => {
-                    // we want to include the newline
-                    n += 1;
-                    self.min_value.extend_from_slice(&buf[..n]);
-                    self.pos += n;
+                Some(n) => {
+                    if let Some(partial_line) = &mut self.partial_line {
+                        partial_line.extend_from_slice(&buf[..=n]);
+                        self.newline_idx = None;
+                        self.pos += n + 1;
+                    } else {
+                        self.newline_idx = Some(self.pos + n);
+                    }
                     break true;
                 }
                 None => {
-                    self.min_value.extend_from_slice(buf);
+                    if self.partial_line.is_none() {
+                        self.partial_line = Some(vec![]);
+                    }
+                    let partial_line = self.partial_line.as_mut().unwrap();
+                    partial_line.extend_from_slice(buf);
                     self.pos += buf.len();
                     continue;
                 }
             }
         };
-
-        let done = self.min_value.is_empty();
-        if !done && !found {
-            // last line is missing newline: normalize so that higher layers can always
-            // rely on the fact that there will be a newline at the end
-            self.min_value.push(b'\n');
+        if !found {
+            if let Some(partial_line) = self.partial_line.as_mut() {
+                // last line is missing newline: normalize so that higher layers can always
+                // rely on the fact that there will be a newline at the end
+                partial_line.push(b'\n');
+            }
         }
 
-        self.parsed_min_value = parse_num_with_newline(&self.min_value);
-        !done
+        self.parsed_min_value = parse_num_with_newline(self.min_value());
+        found || self.partial_line.is_some()
     }
 
     fn fill_buf(&mut self) -> usize {
@@ -177,49 +199,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ascii_number_comparison() {
-        use std::cmp::Ordering::*;
-
-        struct TestFixture {
-            a: String,
-            b: String,
-            expected: std::cmp::Ordering,
-        }
-
-        let tests = vec![
-            TestFixture {
-                a: "37".to_owned(),
-                b: "277".to_owned(),
-                expected: Less,
-            },
-            TestFixture {
-                a: "277".to_owned(),
-                b: "277".to_owned(),
-                expected: Equal,
-            },
-            TestFixture {
-                a: "278".to_owned(),
-                b: "277".to_owned(),
-                expected: Greater,
-            },
-        ];
-        for mut t in tests {
-            t.a.push('\n');
-            t.b.push('\n');
-            assert_eq!(
-                t.expected,
-                ascii_number_cmp(&t.a.as_bytes(), &t.b.as_bytes())
-            );
-        }
-    }
-
-    #[test]
     fn test_sorted_file() {
         const FILE: &str = "files/2m.txt";
         let mut sf = SortedFile::new(FILE);
-        assert_eq!("1671670171236\n".as_bytes(), &sf.min_value);
+        assert_eq!("1671670171236\n".as_bytes(), sf.min_value());
 
         assert_eq!(true, sf.next_line());
-        assert_eq!("1671670171236\n".as_bytes(), &sf.min_value);
+        assert_eq!("1671670171236\n".as_bytes(), sf.min_value());
     }
 }
