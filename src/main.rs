@@ -42,13 +42,19 @@ fn find_min_idx(files: &[SortedFile]) -> Option<usize> {
         .map(|(idx, _)| idx)
 }
 
+#[derive(Debug, PartialEq)]
+enum LineReadState {
+    WaitingForScan,
+    NewlineFound(usize),
+    PartialLine(Vec<u8>),
+}
+
 #[derive(Debug)]
 struct SortedFile {
     parsed_min_value: u64,
     file_size: u64,
 
-    newline_idx: Option<usize>,
-    partial_line: Option<Vec<u8>>,
+    state: LineReadState,
 
     reader: fs::File,
     aligned_buf: Box<[u8]>,
@@ -75,10 +81,9 @@ impl SortedFile {
 
         let mut ret = Self {
             file_size,
-            newline_idx: None,
-            parsed_min_value: 0,
-            partial_line: None,
+            state: LineReadState::WaitingForScan,
             reader,
+            parsed_min_value: 0,
             aligned_buf,
             pos: 0,
             filled: 0,
@@ -89,24 +94,29 @@ impl SortedFile {
     }
 
     pub fn min_value_ascii_bytes(&self) -> &[u8] {
-        if let Some(line) = &self.partial_line {
-            return line;
-        }
-        match self.newline_idx {
-            Some(idx) => unsafe { self.aligned_buf.get_unchecked(self.pos..=idx) },
-            None => &[],
+        use LineReadState::*;
+        match self.state {
+            WaitingForScan => &[],
+            PartialLine(ref line) => line,
+            NewlineFound(idx) => unsafe { self.aligned_buf.get_unchecked(self.pos..=idx) },
         }
     }
 
     pub fn next_line(&mut self) -> bool {
-        if self.partial_line.is_some() {
-            self.partial_line = None;
-        }
-        if let Some(idx) = self.newline_idx {
-            self.pos = idx + 1; // +1 to skip newline char
+        use LineReadState::*;
+
+        // reset previous state if necessary
+        match self.state {
+            PartialLine(_) => {
+                self.state = WaitingForScan;
+            }
+            NewlineFound(idx) => {
+                self.pos = idx + 1; // +1 to skip newline char
+            }
+            WaitingForScan => (),
         }
 
-        let found = loop {
+        let newline_found = loop {
             let avail = self.fill_buf();
             if avail == 0 {
                 break false;
@@ -117,36 +127,42 @@ impl SortedFile {
             let buf = unsafe { self.aligned_buf.get_unchecked(self.pos..self.filled) };
             match memchr::memchr(b'\n', buf) {
                 Some(n) => {
-                    if let Some(partial_line) = &mut self.partial_line {
-                        partial_line.extend_from_slice(&buf[..=n]);
-                        self.newline_idx = None;
-                        self.pos += n + 1;
-                    } else {
-                        self.newline_idx = Some(self.pos + n);
+                    match self.state {
+                        PartialLine(ref mut partial_line) => {
+                            partial_line.extend_from_slice(&buf[..=n]);
+                            self.pos += n + 1;
+                        }
+                        WaitingForScan | NewlineFound(_) => {
+                            self.state = NewlineFound(self.pos + n);
+                        }
                     }
                     break true;
                 }
                 None => {
-                    if self.partial_line.is_none() {
-                        self.partial_line = Some(vec![]);
-                    }
-                    let partial_line = self.partial_line.as_mut().unwrap();
-                    partial_line.extend_from_slice(buf);
+                    match self.state {
+                        WaitingForScan | NewlineFound(_) => self.state = PartialLine(buf.into()),
+                        PartialLine(ref mut pl) => {
+                            pl.extend_from_slice(buf);
+                        }
+                    };
                     self.pos += buf.len();
                     continue;
                 }
             }
         };
-        if !found {
-            if let Some(partial_line) = self.partial_line.as_mut() {
-                // last line is missing newline: normalize so that higher layers can always
-                // rely on the fact that there will be a newline at the end
-                partial_line.push(b'\n');
-            }
-        }
 
         self.parsed_min_value = parse_num_with_newline(self.min_value_ascii_bytes());
-        found || self.partial_line.is_some()
+
+        if let PartialLine(ref mut buf) = self.state {
+            if !newline_found {
+                // last line is missing newline: normalize so that higher layers can always
+                // rely on the fact that there will be a newline at the end
+                buf.push(b'\n');
+            }
+            true
+        } else {
+            newline_found
+        }
     }
 
     fn fill_buf(&mut self) -> usize {
