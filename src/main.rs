@@ -1,5 +1,6 @@
 use std::{env, fs, io::Read};
 
+use libc::memchr;
 use rustix::fs::{MetadataExt, OpenOptionsExt};
 mod iodirect;
 
@@ -122,10 +123,25 @@ impl SortedFile {
                 break false;
             }
 
+            const LINE_WIDTH_INCL_NEWLINE: usize = 14;
+
             // perf: eliminate unnecessary bounds check
             // SAFETY: we guarantee that self.pos is always a valid index into aligned buf
             let buf = unsafe { self.aligned_buf.get_unchecked(self.pos..self.filled) };
-            match memchr::memchr(b'\n', buf) {
+            let newline_idx = match self.state {
+                WaitingForScan | NewlineFound(_) if buf.len() >= LINE_WIDTH_INCL_NEWLINE => {
+                    // in both of these cases, we are at a line
+                    // boundary
+                    Some(LINE_WIDTH_INCL_NEWLINE - 1)
+                }
+                _ => {
+                    // we have to scan for newline since the previous iteraion
+                    // read part of this line
+                    memchr::memchr(b'\n', buf)
+                }
+            };
+
+            match newline_idx {
                 Some(n) => {
                     match self.state {
                         PartialLine(ref mut partial_line) => {
