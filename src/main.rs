@@ -23,19 +23,18 @@ fn main() {
 
     let mut output = iodirect::File::new("result.txt", expected_file_size as usize);
 
-    while let Some(idx) = find_min(&input) {
+    while let Some(idx) = find_min_idx(&input) {
         let sorted_file = &mut input[idx];
         output
-            .write_bytes(sorted_file.min_value())
+            .write_bytes(sorted_file.min_value_ascii_bytes())
             .expect("output.write_bytes failed");
         if !sorted_file.next_line() {
-            // PeekMut::<'_, SortedFile>::pop(sorted_file);
             input.swap_remove(idx);
         }
     }
 }
 
-fn find_min(files: &[SortedFile]) -> Option<usize> {
+fn find_min_idx(files: &[SortedFile]) -> Option<usize> {
     files
         .iter()
         .enumerate()
@@ -45,10 +44,10 @@ fn find_min(files: &[SortedFile]) -> Option<usize> {
 
 #[derive(Debug)]
 struct SortedFile {
+    parsed_min_value: u64,
     file_size: u64,
 
     newline_idx: Option<usize>,
-    parsed_min_value: u64,
     partial_line: Option<Vec<u8>>,
 
     reader: fs::File,
@@ -89,7 +88,7 @@ impl SortedFile {
         ret
     }
 
-    pub fn min_value(&self) -> &[u8] {
+    pub fn min_value_ascii_bytes(&self) -> &[u8] {
         if let Some(line) = &self.partial_line {
             return line;
         }
@@ -146,7 +145,7 @@ impl SortedFile {
             }
         }
 
-        self.parsed_min_value = parse_num_with_newline(self.min_value());
+        self.parsed_min_value = parse_num_with_newline(self.min_value_ascii_bytes());
         found || self.partial_line.is_some()
     }
 
@@ -188,9 +187,9 @@ mod tests {
     fn test_sorted_file() {
         const FILE: &str = "files/2m.txt";
         let mut sf = SortedFile::new(FILE);
-        assert_eq!("1671670171236\n".as_bytes(), sf.min_value());
+        assert_eq!("1671670171236\n".as_bytes(), sf.min_value_ascii_bytes());
 
         assert_eq!(true, sf.next_line());
-        assert_eq!("1671670171236\n".as_bytes(), sf.min_value());
+        assert_eq!("1671670171236\n".as_bytes(), sf.min_value_ascii_bytes());
     }
 }
