@@ -1,8 +1,21 @@
-use std::{env, fs, io::Read};
+use std::{
+    env, fs,
+    io::{ErrorKind, Read},
+};
 
-use libc::memchr;
 use rustix::fs::{MetadataExt, OpenOptionsExt};
 mod iodirect;
+
+// Flagged as dead code unfortunately
+#[allow(dead_code)]
+const fn check_consts() {
+    assert!(
+        iodirect::ALIGN >= LINE_WIDTH_INCL_NEWLINE,
+        "align size has to be atleast as big as one line to deal with parsing partial lines"
+    )
+}
+
+const _: () = check_consts();
 
 fn main() {
     let mut input: Vec<_> = env::args()
@@ -24,44 +37,40 @@ fn main() {
 
     let mut output = iodirect::File::new("result.txt", expected_file_size as usize);
 
-    while let Some(idx) = find_min_idx(&input) {
+    while let Some(idx) = find_min_idx(&mut input) {
         let sorted_file = &mut input[idx];
-        output
-            .write_bytes(sorted_file.min_value_ascii_bytes())
-            .expect("output.write_bytes failed");
-        if !sorted_file.next_line() {
+        if let Some(line) = sorted_file.next() {
+            output.write_bytes(line).expect("output.write_bytes failed");
+        } else {
             input.swap_remove(idx);
         }
     }
 }
 
-fn find_min_idx(files: &[SortedFile]) -> Option<usize> {
+fn find_min_idx(files: &mut [SortedFile]) -> Option<usize> {
     files
-        .iter()
+        .iter_mut()
         .enumerate()
-        .min_by_key(|&(_, file)| file.parsed_min_value)
+        .map(|(idx, sf)| (idx, sf.peek()))
+        .min_by_key(|(_, val)| *val)
         .map(|(idx, _)| idx)
-}
-
-#[derive(Debug, PartialEq)]
-enum LineReadState {
-    WaitingForScan,
-    NewlineFound(usize),
-    PartialLine(Vec<u8>),
 }
 
 #[derive(Debug)]
 struct SortedFile {
-    parsed_min_value: u64,
     file_size: u64,
 
-    state: LineReadState,
+    parsed_lines: Vec<u64>,
+    parsed_line_pos: usize,
+    partial_line_bytes: usize,
 
     reader: fs::File,
     aligned_buf: Box<[u8]>,
     pos: usize,
     filled: usize,
 }
+
+const LINE_WIDTH_INCL_NEWLINE: usize = 14;
 
 impl SortedFile {
     fn new(file_path: &str) -> Self {
@@ -74,124 +83,113 @@ impl SortedFile {
 
         let aligned_buf = unsafe {
             const SZ: usize = 1 << 20;
-            let layout = std::alloc::Layout::from_size_align(SZ, iodirect::ALIGN).unwrap();
+
+            // leave ALIGN size bytes in the beginning to deal with
+            // partial lines while parsing
+            let alloc_size = iodirect::ALIGN + SZ;
+            let layout = std::alloc::Layout::from_size_align(alloc_size, iodirect::ALIGN).unwrap();
             let ptr = std::alloc::alloc_zeroed(layout);
-            let slice = std::slice::from_raw_parts_mut(ptr, SZ);
+            let slice = std::slice::from_raw_parts_mut(ptr, alloc_size);
             Box::from_raw(slice)
         };
 
         let mut ret = Self {
             file_size,
-            state: LineReadState::WaitingForScan,
+
+            parsed_lines: Vec::with_capacity(file_size as usize / LINE_WIDTH_INCL_NEWLINE),
+            parsed_line_pos: 0,
+            partial_line_bytes: 0,
+
             reader,
-            parsed_min_value: 0,
             aligned_buf,
             pos: 0,
             filled: 0,
         };
-
-        ret.next_line();
+        ret.fill_parsed_lines();
         ret
     }
 
-    pub fn min_value_ascii_bytes(&self) -> &[u8] {
-        use LineReadState::*;
-        match self.state {
-            WaitingForScan => &[],
-            PartialLine(ref line) => line,
-            NewlineFound(idx) => unsafe { self.aligned_buf.get_unchecked(self.pos..=idx) },
+    pub fn peek(&mut self) -> Option<u64> {
+        match self.parsed_lines.get(self.parsed_line_pos) {
+            Some(val) => Some(*val),
+            None => {
+                self.fill_parsed_lines();
+                self.parsed_lines.get(self.parsed_line_pos).copied()
+            }
         }
     }
 
-    pub fn next_line(&mut self) -> bool {
-        use LineReadState::*;
-
-        // reset previous state if necessary
-        match self.state {
-            PartialLine(_) => {
-                self.state = WaitingForScan;
+    pub fn next(&mut self) -> Option<&[u8]> {
+        self.fill_parsed_lines();
+        match self.parsed_lines.get(self.parsed_line_pos) {
+            None => None,
+            Some(_) => {
+                self.parsed_line_pos += 1;
+                let range = self.pos..self.pos + LINE_WIDTH_INCL_NEWLINE;
+                self.pos += LINE_WIDTH_INCL_NEWLINE;
+                self.aligned_buf.get(range)
             }
-            NewlineFound(idx) => {
-                self.pos = idx + 1; // +1 to skip newline char
-            }
-            WaitingForScan => (),
-        }
-
-        let newline_found = loop {
-            let avail = self.fill_buf();
-            if avail == 0 {
-                break false;
-            }
-
-            const LINE_WIDTH_INCL_NEWLINE: usize = 14;
-
-            // perf: eliminate unnecessary bounds check
-            // SAFETY: we guarantee that self.pos is always a valid index into aligned buf
-            let buf = unsafe { self.aligned_buf.get_unchecked(self.pos..self.filled) };
-            let newline_idx = match self.state {
-                WaitingForScan | NewlineFound(_) if buf.len() >= LINE_WIDTH_INCL_NEWLINE => {
-                    // in both of these cases, we are at a line
-                    // boundary
-                    Some(LINE_WIDTH_INCL_NEWLINE - 1)
-                }
-                _ => {
-                    // we have to scan for newline since the previous iteraion
-                    // read part of this line
-                    memchr::memchr(b'\n', buf)
-                }
-            };
-
-            match newline_idx {
-                Some(n) => {
-                    match self.state {
-                        PartialLine(ref mut partial_line) => {
-                            partial_line.extend_from_slice(&buf[..=n]);
-                            self.pos += n + 1;
-                        }
-                        WaitingForScan | NewlineFound(_) => {
-                            self.state = NewlineFound(self.pos + n);
-                        }
-                    }
-                    break true;
-                }
-                None => {
-                    match self.state {
-                        WaitingForScan | NewlineFound(_) => self.state = PartialLine(buf.into()),
-                        PartialLine(ref mut pl) => {
-                            pl.extend_from_slice(buf);
-                        }
-                    };
-                    self.pos += buf.len();
-                    continue;
-                }
-            }
-        };
-
-        self.parsed_min_value = parse_num_with_newline(self.min_value_ascii_bytes());
-
-        if let PartialLine(ref mut buf) = self.state {
-            if !newline_found {
-                // last line is missing newline: normalize so that higher layers can always
-                // rely on the fact that there will be a newline at the end
-                buf.push(b'\n');
-            }
-            true
-        } else {
-            newline_found
         }
     }
 
-    fn fill_buf(&mut self) -> usize {
-        if self.pos >= self.filled {
-            debug_assert_eq!(self.pos, self.filled);
-            let n = self
-                .reader
-                .read(&mut self.aligned_buf)
-                .expect("failed to read form file");
-            self.pos = 0;
-            self.filled = n;
+    fn fill_parsed_lines(&mut self) {
+        if self.parsed_line_pos < self.parsed_lines.len() {
+            return;
         }
-        self.filled - self.pos
+        assert_eq!(self.parsed_line_pos, self.parsed_lines.len());
+
+        self.parsed_line_pos = 0;
+        self.parsed_lines.clear();
+
+        self.pos = iodirect::ALIGN;
+        self.filled = self.pos;
+
+        if self.partial_line_bytes > 0 {
+            self.pos -= self.partial_line_bytes;
+            self.aligned_buf
+                .copy_within(0..self.partial_line_bytes, self.pos);
+            self.partial_line_bytes = 0;
+        }
+
+        self.fill_buf();
+
+        let buf = &self.aligned_buf[self.pos..self.filled];
+        let lines = buf.chunks_exact(LINE_WIDTH_INCL_NEWLINE);
+        let partial_line = lines.remainder();
+        self.partial_line_bytes = partial_line.len();
+
+        for line in lines {
+            let parsed_line = parse_num_with_newline(line);
+            self.parsed_lines.push(parsed_line);
+        }
+
+        let n = self.partial_line_bytes;
+        // save the partial line at beginning so that we can copy
+        // it to the right place next time
+        self.aligned_buf
+            .copy_within(self.filled - n..self.filled, 0);
+    }
+
+    fn fill_buf(&mut self) {
+        let mut buf = &mut self.aligned_buf[iodirect::ALIGN..];
+        while self.filled - self.pos < LINE_WIDTH_INCL_NEWLINE {
+            match self.reader.read(buf) {
+                Ok(0) => break, // eof
+                Ok(non_zero) => {
+                    self.filled += non_zero;
+                    buf = &mut buf[non_zero..];
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => panic!("fill_parsed_lines: read from file failed: {e})"),
+            }
+        }
+        let avail = self.filled - self.pos;
+        if avail > 0 && avail < LINE_WIDTH_INCL_NEWLINE {
+            // will only happen once if the last line is missing
+            // newline
+            self.aligned_buf[self.filled] = b'\n';
+            self.filled += 1;
+        }
     }
 }
 
@@ -213,15 +211,80 @@ fn parse_num_with_newline(digits: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader};
+
     use super::*;
+
+    const FILE: &str = "files/2m.txt";
 
     #[test]
     fn test_sorted_file() {
-        const FILE: &str = "files/2m.txt";
         let mut sf = SortedFile::new(FILE);
-        assert_eq!("1671670171236\n".as_bytes(), sf.min_value_ascii_bytes());
+        assert_eq!(Some("1671670171236\n".as_bytes()), sf.next());
+        assert_eq!(Some("1671670171236\n".as_bytes()), sf.next());
+    }
 
-        assert_eq!(true, sf.next_line());
-        assert_eq!("1671670171236\n".as_bytes(), sf.min_value_ascii_bytes());
+    #[test]
+    fn test_whole_file() {
+        let of = fs::File::open(FILE).unwrap();
+        let mut lines = BufReader::new(of).lines();
+
+        let mut sf = SortedFile::new(FILE);
+        let mut n = 0;
+        while let Some(bs) = sf.next() {
+            let mut with_nl = lines.next().unwrap().unwrap();
+            with_nl.push('\n');
+            let as_str = std::str::from_utf8(bs).unwrap();
+            assert_eq!(&with_nl, as_str, "line_idx: #{n}");
+            n += 1;
+        }
+        assert_eq!(2_000_000, n);
+    }
+
+    #[test]
+    fn test_two_files() {
+        let inputs = ["files/2m.txt", "files/4m.txt"];
+        let mut expected = stdlib_solution_iter(&inputs);
+        let mut sorted_files: Vec<_> = inputs.iter().copied().map(SortedFile::new).collect();
+
+        let mut nr = 0;
+        loop {
+            match find_min_idx(&mut sorted_files) {
+                None => {
+                    assert_eq!(None, expected.next(), "our solution exited too early");
+                    break;
+                }
+                Some(idx) => {
+                    match (&mut sorted_files[idx]).next() {
+                        None => {
+                            // this file is exhausted
+                            sorted_files.swap_remove(idx);
+                            continue;
+                        }
+                        Some(actual) => {
+                            let actual_str = std::str::from_utf8(actual).expect("not valid utf8");
+                            let mut expected_str = expected
+                                .next()
+                                .expect("stdlib solution exhausted too early")
+                                .to_string();
+                            expected_str.push('\n');
+                            assert_eq!(expected_str, actual_str, "line_idx: {nr}");
+                        }
+                    }
+                }
+            }
+            nr += 1;
+        }
+    }
+
+    fn stdlib_solution_iter(file_names: &[&str]) -> impl Iterator<Item = u64> {
+        let mut res = Vec::new();
+        for f in file_names {
+            let lines = BufReader::new(fs::File::open(f).unwrap()).lines();
+            let lines = lines.map(|x| x.unwrap().parse::<u64>().unwrap());
+            res.extend(lines);
+        }
+        res.sort();
+        res.into_iter()
     }
 }
