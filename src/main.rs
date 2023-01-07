@@ -53,12 +53,23 @@ fn main() {
 }
 
 fn find_min_idx(files: &mut [SortedFile]) -> Option<usize> {
-    files
-        .iter_mut()
-        .enumerate()
-        .map(|(idx, sf)| (idx, sf.peek()))
-        .min_by_key(|(_, val)| *val)
-        .map(|(idx, _)| idx)
+    let mut min_idx: usize = 0;
+    let mut min: u64 = u64::MAX;
+    if files.is_empty() {
+        return None;
+    }
+    for (idx, sf) in files.iter_mut().enumerate() {
+        match sf.peek() {
+            None => return Some(idx),
+            Some(val) => {
+                if val < min {
+                    min = val;
+                    min_idx = idx;
+                }
+            }
+        }
+    }
+    Some(min_idx)
 }
 
 #[derive(Debug)]
