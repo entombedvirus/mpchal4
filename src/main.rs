@@ -1,3 +1,7 @@
+#![feature(array_windows)]
+#![feature(array_chunks)]
+#![feature(iter_array_chunks)]
+#![feature(ptr_sub_ptr)]
 use std::{
     env, fs,
     io::{ErrorKind, Read},
@@ -5,6 +9,7 @@ use std::{
 
 use rustix::fs::{MetadataExt, OpenOptionsExt};
 mod iodirect;
+mod simd_decimal;
 
 // Flagged as dead code unfortunately
 #[allow(dead_code)]
@@ -154,14 +159,22 @@ impl SortedFile {
         self.fill_buf();
 
         let buf = &self.aligned_buf[self.pos..self.filled];
-        let lines = buf.chunks_exact(LINE_WIDTH_INCL_NEWLINE);
-        let partial_line = lines.remainder();
-        self.partial_line_bytes = partial_line.len();
 
-        for line in lines {
-            let parsed_line = parse_num_with_newline(line);
-            self.parsed_lines.push(parsed_line);
-        }
+        // let lines = buf.chunks_exact(LINE_WIDTH_INCL_NEWLINE);
+        // let partial_line = lines.remainder();
+        // self.partial_line_bytes = partial_line.len();
+
+        // for line in lines {
+        //     let parsed_line = parse_num_with_newline(line);
+        //     self.parsed_lines.push(parsed_line);
+        // }
+
+        let num_complete_lines = buf.len() / LINE_WIDTH_INCL_NEWLINE;
+        self.partial_line_bytes = buf.len() % LINE_WIDTH_INCL_NEWLINE;
+        simd_decimal::parse_decimals::<4, LINE_WIDTH_INCL_NEWLINE>(
+            &buf[..num_complete_lines * LINE_WIDTH_INCL_NEWLINE],
+            &mut self.parsed_lines,
+        );
 
         let n = self.partial_line_bytes;
         // save the partial line at beginning so that we can copy
@@ -191,22 +204,6 @@ impl SortedFile {
             self.filled += 1;
         }
     }
-}
-
-fn parse_num_with_newline(digits: &[u8]) -> u64 {
-    // ignore empty and just newline char
-    assert!(
-        digits.len() > 1,
-        "expecting at least one digit plus newline"
-    );
-
-    let mut res: u64 = 0;
-    for &c in &digits[..digits.len() - 1] {
-        res *= 10;
-        let digit = (c as u64) - '0' as u64;
-        res += digit;
-    }
-    res
 }
 
 #[cfg(test)]
