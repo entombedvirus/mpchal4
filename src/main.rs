@@ -44,8 +44,8 @@ fn main() {
 
     while let Some(idx) = find_min_idx(&mut input) {
         let sorted_file = &mut input[idx];
-        if let Some(line) = sorted_file.next() {
-            output.write_bytes(line).expect("output.write_bytes failed");
+        if let Some(v) = sorted_file.next() {
+            output.write_u64(v).expect("output.write_u64 failed");
         } else {
             input.swap_remove(idx);
         }
@@ -124,23 +124,24 @@ impl SortedFile {
         }
     }
 
-    pub fn next(&mut self) -> Option<&[u8]> {
-        self.fill_parsed_lines();
-        match self.parsed_lines.get(self.parsed_line_pos) {
-            None => None,
-            Some(_) => {
-                self.parsed_line_pos += 1;
-                let range = self.pos..self.pos + LINE_WIDTH_INCL_NEWLINE;
-                self.pos += LINE_WIDTH_INCL_NEWLINE;
-                self.aligned_buf.get(range)
-            }
+    pub fn next(&mut self) -> Option<u64> {
+        let ret = self.peek();
+        if ret.is_some() {
+            self.parsed_line_pos += 1;
         }
+        ret
+        // match self.parsed_lines.get(self.parsed_line_pos) {
+        //     None => None,
+        //     Some(_) => {
+        //         self.parsed_line_pos += 1;
+        //         let range = self.pos..self.pos + LINE_WIDTH_INCL_NEWLINE;
+        //         self.pos += LINE_WIDTH_INCL_NEWLINE;
+        //         self.aligned_buf.get(range)
+        //     }
+        // }
     }
 
     fn fill_parsed_lines(&mut self) {
-        if self.parsed_line_pos < self.parsed_lines.len() {
-            return;
-        }
         assert_eq!(self.parsed_line_pos, self.parsed_lines.len());
 
         self.parsed_line_pos = 0;
@@ -217,22 +218,19 @@ mod tests {
     #[test]
     fn test_sorted_file() {
         let mut sf = SortedFile::new(FILE);
-        assert_eq!(Some("1671670171236\n".as_bytes()), sf.next());
-        assert_eq!(Some("1671670171236\n".as_bytes()), sf.next());
+        assert_eq!(Some(1671670171236_u64), sf.next());
+        assert_eq!(Some(1671670171236_u64), sf.next());
     }
 
     #[test]
     fn test_whole_file() {
-        let of = fs::File::open(FILE).unwrap();
-        let mut lines = BufReader::new(of).lines();
+        let mut lines = stdlib_solution_iter(&[FILE]);
 
         let mut sf = SortedFile::new(FILE);
         let mut n = 0;
-        while let Some(bs) = sf.next() {
-            let mut with_nl = lines.next().unwrap().unwrap();
-            with_nl.push('\n');
-            let as_str = std::str::from_utf8(bs).unwrap();
-            assert_eq!(&with_nl, as_str, "line_idx: #{n}");
+        while let Some(actual) = sf.next() {
+            let expected: u64 = lines.next().unwrap();
+            assert_eq!(expected, actual, "line_idx: #{n}");
             n += 1;
         }
         assert_eq!(2_000_000, n);
@@ -259,13 +257,7 @@ mod tests {
                             continue;
                         }
                         Some(actual) => {
-                            let actual_str = std::str::from_utf8(actual).expect("not valid utf8");
-                            let mut expected_str = expected
-                                .next()
-                                .expect("stdlib solution exhausted too early")
-                                .to_string();
-                            expected_str.push('\n');
-                            assert_eq!(expected_str, actual_str, "line_idx: {nr}");
+                            assert_eq!(expected.next().unwrap(), actual, "line_idx: {nr}");
                         }
                     }
                 }

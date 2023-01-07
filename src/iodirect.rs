@@ -93,6 +93,24 @@ impl File {
         }
     }
 
+    pub fn write_u64(&mut self, v: u64) -> io::Result<()> {
+        let buf = self.cur_buf.get_ref();
+        let cap = buf.len() - self.cur_buf.position() as usize;
+        if cap < 14 {
+            let mut line = v.to_string();
+            line.push('\n');
+            let (partial, rem) = line.split_at(cap);
+            let wr = self.cur_buf.write(partial.as_bytes()).unwrap();
+            assert_eq!(wr, partial.len(), "write_bytes: partial: short write");
+            self.flush().expect("write_bytes: flush failed");
+            let wr = self.cur_buf.write(rem.as_bytes()).unwrap();
+            assert_eq!(wr, rem.len(), "write_bytes: partial: short write");
+            return Ok(());
+        }
+
+        writeln!(&mut self.cur_buf, "{v}")
+    }
+
     pub fn write_bytes(&mut self, mut line: &[u8]) -> io::Result<()> {
         let buf = self.cur_buf.get_ref();
         let cap = buf.len() - self.cur_buf.position() as usize;
