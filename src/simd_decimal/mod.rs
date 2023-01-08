@@ -1,8 +1,7 @@
 use std::{
     arch::x86_64::{
-        __m128i, _mm_andnot_si128, _mm_cmpeq_epi8, _mm_cvtsi128_si64, _mm_madd_epi16,
-        _mm_maddubs_epi16, _mm_max_epu8, _mm_movemask_epi8, _mm_packs_epi32, _mm_set1_epi8,
-        _mm_setr_epi16, _mm_setr_epi8, _mm_shuffle_epi8, _mm_sub_epi8, _mm_test_all_ones,
+        _mm_cvtsi128_si64, _mm_madd_epi16, _mm_maddubs_epi16, _mm_packs_epi32, _mm_set1_epi8,
+        _mm_setr_epi16, _mm_setr_epi8, _mm_shuffle_epi8, _mm_sub_epi8,
     },
     io::BufRead,
 };

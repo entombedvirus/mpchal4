@@ -141,15 +141,6 @@ impl SortedFile {
             self.parsed_line_pos += 1;
         }
         ret
-        // match self.parsed_lines.get(self.parsed_line_pos) {
-        //     None => None,
-        //     Some(_) => {
-        //         self.parsed_line_pos += 1;
-        //         let range = self.pos..self.pos + LINE_WIDTH_INCL_NEWLINE;
-        //         self.pos += LINE_WIDTH_INCL_NEWLINE;
-        //         self.aligned_buf.get(range)
-        //     }
-        // }
     }
 
     fn fill_parsed_lines(&mut self) {
@@ -171,15 +162,6 @@ impl SortedFile {
         self.fill_buf();
 
         let buf = &self.aligned_buf[self.pos..self.filled];
-
-        // let lines = buf.chunks_exact(LINE_WIDTH_INCL_NEWLINE);
-        // let partial_line = lines.remainder();
-        // self.partial_line_bytes = partial_line.len();
-
-        // for line in lines {
-        //     let parsed_line = parse_num_with_newline(line);
-        //     self.parsed_lines.push(parsed_line);
-        // }
 
         let num_complete_lines = buf.len() / LINE_WIDTH_INCL_NEWLINE;
         self.partial_line_bytes = buf.len() % LINE_WIDTH_INCL_NEWLINE;
