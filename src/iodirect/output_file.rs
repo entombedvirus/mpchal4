@@ -1,3 +1,5 @@
+use crate::iodirect::ALIGN;
+use crate::iodirect::CHUNK_SIZE;
 use std::{
     fs,
     io::{self, Cursor, Write},
@@ -6,22 +8,7 @@ use std::{
 
 use rustix::fs::{FileExt, OpenOptionsExt};
 
-const CHUNK_SIZE: usize = 1 << 20;
-pub const ALIGN: usize = 4096;
-
-type Buf = Cursor<Box<[u8]>>;
-
-fn new_buf() -> Buf {
-    let layout = std::alloc::Layout::from_size_align(CHUNK_SIZE, ALIGN).unwrap();
-    let boxed_slice = unsafe {
-        let ptr = std::alloc::alloc_zeroed(layout);
-        let slice = std::slice::from_raw_parts_mut(ptr, CHUNK_SIZE);
-        Box::from_raw(slice)
-    };
-    Cursor::new(boxed_slice)
-}
-
-pub struct File {
+pub struct OutputFile {
     cur_buf: Buf,
     io_chan: Option<mpsc::Sender<Buf>>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -30,8 +17,8 @@ pub struct File {
     fmt: TimeFormatter<14, 4>,
 }
 
-impl File {
-    pub fn new(path: &str, expected_file_size: usize) -> File {
+impl OutputFile {
+    pub fn new(path: &str, expected_file_size: usize) -> OutputFile {
         let inner = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -140,7 +127,7 @@ impl File {
     }
 }
 
-impl Drop for File {
+impl Drop for OutputFile {
     fn drop(&mut self) {
         // write buffered lines, if any
         Self::flush(
@@ -212,9 +199,21 @@ impl<const LINE_WIDTH: usize> TimeFormatter<LINE_WIDTH, 4> {
     }
 }
 
+type Buf = Cursor<Box<[u8]>>;
+
+fn new_buf() -> Buf {
+    let layout = std::alloc::Layout::from_size_align(CHUNK_SIZE, ALIGN).unwrap();
+    let boxed_slice = unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout);
+        let slice = std::slice::from_raw_parts_mut(ptr, CHUNK_SIZE);
+        Box::from_raw(slice)
+    };
+    Cursor::new(boxed_slice)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::output_file::*;
 
     #[test]
     fn test_time_formatter() {
