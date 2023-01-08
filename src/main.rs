@@ -4,7 +4,8 @@
 #![feature(ptr_sub_ptr)]
 use std::{
     env, fs,
-    io::{ErrorKind, Read},
+    io::{self, ErrorKind, Read},
+    sync::mpsc::RecvError,
 };
 
 use rustix::fs::{MetadataExt, OpenOptionsExt};
@@ -76,27 +77,23 @@ fn find_min_idx(files: &mut [SortedFile]) -> Option<usize> {
 struct SortedFile {
     file_size: u64,
 
+    cur_buf: Option<ReadBuffer>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    io: Option<std::sync::mpsc::Receiver<ReadBuffer>>,
+}
+
+#[derive(Debug)]
+struct ReadBuffer {
     parsed_lines: Vec<u64>,
     parsed_line_pos: usize,
-    partial_line_bytes: usize,
 
-    reader: fs::File,
     aligned_buf: Box<[u8]>,
     pos: usize,
     filled: usize,
 }
 
-const LINE_WIDTH_INCL_NEWLINE: usize = 14;
-
-impl SortedFile {
-    fn new(file_path: &str) -> Self {
-        let reader = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(file_path)
-            .expect("failed to open input");
-        let file_size = reader.metadata().unwrap().size();
-
+impl ReadBuffer {
+    pub fn new(file_size: usize) -> Self {
         let aligned_buf = unsafe {
             const SZ: usize = 1 << 20;
 
@@ -109,103 +106,29 @@ impl SortedFile {
             Box::from_raw(slice)
         };
 
-        let mut ret = Self {
-            file_size,
-
-            parsed_lines: Vec::with_capacity(file_size as usize / LINE_WIDTH_INCL_NEWLINE),
+        Self {
+            parsed_lines: Vec::with_capacity(file_size / LINE_WIDTH_INCL_NEWLINE),
             parsed_line_pos: 0,
-            partial_line_bytes: 0,
 
-            reader,
             aligned_buf,
             pos: 0,
             filled: 0,
-        };
-        ret.fill_parsed_lines();
-        ret
-    }
-
-    pub fn peek(&mut self) -> Option<u64> {
-        match self.parsed_lines.get(self.parsed_line_pos) {
-            Some(val) => Some(*val),
-            None => {
-                self.fill_parsed_lines();
-                self.parsed_lines.get(self.parsed_line_pos).copied()
-            }
         }
     }
 
-    pub fn next(&mut self) -> Option<u64> {
-        let ret = self.peek();
-        if ret.is_some() {
-            self.parsed_line_pos += 1;
-        }
-        ret
-        // match self.parsed_lines.get(self.parsed_line_pos) {
-        //     None => None,
-        //     Some(_) => {
-        //         self.parsed_line_pos += 1;
-        //         let range = self.pos..self.pos + LINE_WIDTH_INCL_NEWLINE;
-        //         self.pos += LINE_WIDTH_INCL_NEWLINE;
-        //         self.aligned_buf.get(range)
-        //     }
-        // }
-    }
-
-    fn fill_parsed_lines(&mut self) {
-        assert_eq!(self.parsed_line_pos, self.parsed_lines.len());
-
-        self.parsed_line_pos = 0;
-        self.parsed_lines.clear();
-
+    pub fn fill_buf<R: Read>(&mut self, mut reader: R) -> io::Result<usize> {
         self.pos = iodirect::ALIGN;
         self.filled = self.pos;
-
-        if self.partial_line_bytes > 0 {
-            self.pos -= self.partial_line_bytes;
-            self.aligned_buf
-                .copy_within(0..self.partial_line_bytes, self.pos);
-            self.partial_line_bytes = 0;
-        }
-
-        self.fill_buf();
-
-        let buf = &self.aligned_buf[self.pos..self.filled];
-
-        // let lines = buf.chunks_exact(LINE_WIDTH_INCL_NEWLINE);
-        // let partial_line = lines.remainder();
-        // self.partial_line_bytes = partial_line.len();
-
-        // for line in lines {
-        //     let parsed_line = parse_num_with_newline(line);
-        //     self.parsed_lines.push(parsed_line);
-        // }
-
-        let num_complete_lines = buf.len() / LINE_WIDTH_INCL_NEWLINE;
-        self.partial_line_bytes = buf.len() % LINE_WIDTH_INCL_NEWLINE;
-        simd_decimal::parse_decimals::<4, LINE_WIDTH_INCL_NEWLINE>(
-            &buf[..num_complete_lines * LINE_WIDTH_INCL_NEWLINE],
-            &mut self.parsed_lines,
-        );
-
-        let n = self.partial_line_bytes;
-        // save the partial line at beginning so that we can copy
-        // it to the right place next time
-        self.aligned_buf
-            .copy_within(self.filled - n..self.filled, 0);
-    }
-
-    fn fill_buf(&mut self) {
-        let mut buf = &mut self.aligned_buf[iodirect::ALIGN..];
+        let mut buf = &mut self.aligned_buf[self.pos..];
         while self.filled - self.pos < LINE_WIDTH_INCL_NEWLINE {
-            match self.reader.read(buf) {
+            match reader.read(buf) {
                 Ok(0) => break, // eof
                 Ok(non_zero) => {
                     self.filled += non_zero;
                     buf = &mut buf[non_zero..];
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => panic!("fill_parsed_lines: read from file failed: {e})"),
+                Err(e) => return Err(e),
             }
         }
         let avail = self.filled - self.pos;
@@ -215,6 +138,102 @@ impl SortedFile {
             self.aligned_buf[self.filled] = b'\n';
             self.filled += 1;
         }
+        Ok(avail)
+    }
+
+    fn parse_buf(&mut self, partial_line: &mut Vec<u8>) {
+        let dst = &mut self.aligned_buf[self.pos - partial_line.len()..self.pos];
+        dst.copy_from_slice(partial_line);
+        self.pos -= partial_line.len();
+
+        partial_line.clear();
+        let buf = &self.aligned_buf[self.pos..self.filled];
+        let n = buf.len() % LINE_WIDTH_INCL_NEWLINE;
+        partial_line.extend_from_slice(&self.aligned_buf[self.filled - n..self.filled]);
+
+        let num_complete_lines = buf.len() / LINE_WIDTH_INCL_NEWLINE;
+        simd_decimal::parse_decimals::<4, LINE_WIDTH_INCL_NEWLINE>(
+            &buf[..num_complete_lines * LINE_WIDTH_INCL_NEWLINE],
+            &mut self.parsed_lines,
+        );
+    }
+}
+const LINE_WIDTH_INCL_NEWLINE: usize = 14;
+
+impl SortedFile {
+    fn new(file_path: &str) -> Self {
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(file_path)
+            .expect("failed to open input");
+        let file_size = reader.metadata().unwrap().size();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut partial_line = Vec::with_capacity(LINE_WIDTH_INCL_NEWLINE);
+
+            loop {
+                let mut new_buf = ReadBuffer::new(file_size as usize);
+                let nr = new_buf
+                    .fill_buf(&mut reader)
+                    .expect("sorted_file: worker: failed to read");
+                if nr == 0 {
+                    // eof
+                    return;
+                }
+                new_buf.parse_buf(&mut partial_line);
+                match tx.send(new_buf) {
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            file_size,
+
+            cur_buf: None,
+            worker: Some(worker),
+            io: Some(rx),
+        }
+    }
+
+    pub fn peek(&mut self) -> Option<u64> {
+        loop {
+            if let Some(cur_buf) = self.cur_buf.as_ref() {
+                if let Some(val) = cur_buf.parsed_lines.get(cur_buf.parsed_line_pos) {
+                    break Some(*val);
+                }
+            }
+
+            match self.io.as_ref().unwrap().recv() {
+                Ok(new_buf) => {
+                    self.cur_buf = Some(new_buf);
+                    continue;
+                }
+                Err(RecvError) => break None,
+            }
+        }
+    }
+
+    pub fn next(&mut self) -> Option<u64> {
+        let ret = self.peek();
+        if ret.is_some() {
+            self.cur_buf.as_mut().unwrap().parsed_line_pos += 1;
+        }
+        ret
+    }
+}
+
+impl Drop for SortedFile {
+    fn drop(&mut self) {
+        // signal worker to shutdown
+        let _ = self.io.take();
+
+        // wait for worker
+        self.worker.take().unwrap().join().unwrap();
     }
 }
 
