@@ -26,6 +26,8 @@ pub struct File {
     io_chan: Option<mpsc::Sender<Buf>>,
     worker: Option<std::thread::JoinHandle<()>>,
     buf_pool: mpsc::Receiver<Buf>,
+
+    fmt: TimeFormatter<14, 4>,
 }
 
 impl File {
@@ -90,27 +92,30 @@ impl File {
             cur_buf: new_buf(),
             worker: Some(worker),
             buf_pool: buf_pool_recv,
+            fmt: TimeFormatter::new(),
         }
     }
 
+    #[inline]
     pub fn write_u64(&mut self, v: u64) -> io::Result<()> {
+        let line = self.fmt.serialized_bytes(v);
+
         let buf = self.cur_buf.get_ref();
         let cap = buf.len() - self.cur_buf.position() as usize;
-        if cap < 14 {
-            let mut line = v.to_string();
-            line.push('\n');
+        if cap < line.len() {
             let (partial, rem) = line.split_at(cap);
-            let wr = self.cur_buf.write(partial.as_bytes()).unwrap();
+            let wr = self.cur_buf.write(partial).unwrap();
             assert_eq!(wr, partial.len(), "write_bytes: partial: short write");
             self.flush().expect("write_bytes: flush failed");
-            let wr = self.cur_buf.write(rem.as_bytes()).unwrap();
+            let wr = self.cur_buf.write(rem).unwrap();
             assert_eq!(wr, rem.len(), "write_bytes: partial: short write");
             return Ok(());
         }
 
-        writeln!(&mut self.cur_buf, "{v}")
+        self.cur_buf.write(&line).map(|_| ())
     }
 
+    #[inline]
     pub fn write_bytes(&mut self, mut line: &[u8]) -> io::Result<()> {
         let buf = self.cur_buf.get_ref();
         let cap = buf.len() - self.cur_buf.position() as usize;
@@ -162,5 +167,58 @@ impl Drop for File {
             .unwrap()
             .join()
             .expect("drop: worker panicked");
+    }
+}
+
+struct TimeFormatter<const LINE_WIDTH: usize, const N: usize> {
+    last_prefix: u64,
+    last_serialized: [u8; LINE_WIDTH],
+}
+
+impl<const LINE_WIDTH: usize, const N: usize> TimeFormatter<LINE_WIDTH, N> {
+    fn new() -> Self {
+        Self {
+            last_prefix: 0,
+            last_serialized: "0123456789abc\n".as_bytes().try_into().unwrap(),
+        }
+    }
+    fn serialized_bytes(&mut self, v: u64) -> [u8; LINE_WIDTH] {
+        let d = 10u64.pow(N as u32);
+        let prefix = v / d;
+        if prefix == self.last_prefix {
+            let suffix = v % d;
+            // likely in case of sorted numbers
+            write!(
+                &mut self.last_serialized[LINE_WIDTH - N - 1..LINE_WIDTH - 1],
+                "{suffix:0width$}",
+                width = N,
+            )
+            .unwrap();
+        } else {
+            self.last_prefix = prefix;
+            write!(&mut self.last_serialized[..LINE_WIDTH - 1], "{v}").unwrap();
+        }
+        self.last_serialized.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_time_formatter() {
+        let mut fmt = TimeFormatter::<14, 4>::new();
+        let expected: [u8; 14] = "1671669405500\n".as_bytes().try_into().unwrap();
+        assert_eq!(fmt.serialized_bytes(1671669405500_u64), expected);
+
+        let expected: [u8; 14] = "1671669405596\n".as_bytes().try_into().unwrap();
+        assert_eq!(fmt.serialized_bytes(1671669405596_u64), expected);
+
+        let expected: [u8; 14] = "2671669401116\n".as_bytes().try_into().unwrap();
+        assert_eq!(fmt.serialized_bytes(2671669401116_u64), expected);
+
+        let expected: [u8; 14] = "2671669400006\n".as_bytes().try_into().unwrap();
+        assert_eq!(fmt.serialized_bytes(2671669400006_u64), expected);
     }
 }
