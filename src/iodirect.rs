@@ -175,7 +175,14 @@ struct TimeFormatter<const LINE_WIDTH: usize, const N: usize> {
     last_serialized: [u8; LINE_WIDTH],
 }
 
-impl<const LINE_WIDTH: usize, const N: usize> TimeFormatter<LINE_WIDTH, N> {
+// 2 digit decimal look up table
+static DEC_DIGITS_LUT: &[u8; 200] = b"0001020304050607080910111213141516171819\
+      2021222324252627282930313233343536373839\
+      4041424344454647484950515253545556575859\
+      6061626364656667686970717273747576777879\
+      8081828384858687888990919293949596979899";
+
+impl<const LINE_WIDTH: usize> TimeFormatter<LINE_WIDTH, 4> {
     fn new() -> Self {
         Self {
             last_prefix: 0,
@@ -183,22 +190,25 @@ impl<const LINE_WIDTH: usize, const N: usize> TimeFormatter<LINE_WIDTH, N> {
         }
     }
     fn serialized_bytes(&mut self, v: u64) -> [u8; LINE_WIDTH] {
-        let d = 10u64.pow(N as u32);
+        let d = 10_000_u64;
         let prefix = v / d;
         if prefix == self.last_prefix {
-            let suffix = v % d;
-            // likely in case of sorted numbers
-            write!(
-                &mut self.last_serialized[LINE_WIDTH - N - 1..LINE_WIDTH - 1],
-                "{suffix:0width$}",
-                width = N,
-            )
-            .unwrap();
+            let lut_ptr = DEC_DIGITS_LUT.as_ptr();
+            let buf_ptr = self.last_serialized.as_mut_ptr();
+            // likely that the only the last N digits are different in case of sorted numbers
+            let suffix = (v % d) as usize;
+            // turn the first two and last two digits to lookup table index
+            let d1 = (suffix / 100) << 1;
+            let d2 = (suffix % 100) << 1;
+            unsafe {
+                core::ptr::copy_nonoverlapping(lut_ptr.add(d1), buf_ptr.add(LINE_WIDTH - 4 - 1), 2);
+                core::ptr::copy_nonoverlapping(lut_ptr.add(d2), buf_ptr.add(LINE_WIDTH - 2 - 1), 2);
+            }
         } else {
             self.last_prefix = prefix;
             write!(&mut self.last_serialized[..LINE_WIDTH - 1], "{v}").unwrap();
         }
-        self.last_serialized.clone()
+        self.last_serialized
     }
 }
 
