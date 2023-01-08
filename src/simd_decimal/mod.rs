@@ -4,6 +4,7 @@ use std::{
         _mm_setr_epi16, _mm_setr_epi8, _mm_shuffle_epi8, _mm_sub_epi8,
     },
     io::BufRead,
+    mem::MaybeUninit,
 };
 
 const REG_BYTES: usize = 16;
@@ -54,19 +55,22 @@ impl<'a, const L: usize, const R: usize, const N: usize> Iterator for ChunkerIte
 
     fn next(&mut self) -> Option<Self::Item> {
         if N * R <= self.slice.len() {
-            let mut vec = Vec::with_capacity(N);
+            let mut arr: [MaybeUninit<&'a [u8; R]>; N] = MaybeUninit::uninit_array();
+            let mut buf = self.slice.as_ptr();
             for i in 0..N {
-                let as_arr_ref: &[u8; R] = self
-                    .slice
-                    .get(i * L..i * L + R)
-                    .unwrap()
-                    .try_into()
-                    .unwrap();
-                vec.push(as_arr_ref);
+                let as_ptr = buf as *const [u8; R];
+                // SAFETY: buf is guaranteed to be a valid address because we check that L <= R
+                // in the constructor and the slice is at least N * R long
+                let as_ref = unsafe {
+                    buf = buf.add(L);
+                    &*as_ptr as &'a [u8; R]
+                };
+                arr[i] = MaybeUninit::new(as_ref);
             }
-            let num_lines = (N * R) / L;
-            self.slice.consume(num_lines * L);
-            Some(vec.try_into().unwrap())
+            self.slice.consume(N * L);
+            // SAFETY: aa elements of arr is written to with valid references
+            // in the loop earlier
+            Some(unsafe { MaybeUninit::array_assume_init(arr) })
         } else {
             None
         }

@@ -2,6 +2,8 @@
 #![feature(array_chunks)]
 #![feature(iter_array_chunks)]
 #![feature(ptr_sub_ptr)]
+#![feature(maybe_uninit_uninit_array)]
+#![feature(maybe_uninit_array_assume_init)]
 use std::{
     env, fs,
     io::{ErrorKind, Read},
