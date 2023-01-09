@@ -8,13 +8,15 @@ use std::{
 
 use rustix::fs::{FileExt, OpenOptionsExt};
 
+use super::LINE_WIDTH_INCL_NEWLINE;
+
 pub struct OutputFile {
     cur_buf: Buf,
     io_chan: Option<mpsc::Sender<Buf>>,
     worker: Option<std::thread::JoinHandle<()>>,
     buf_pool: mpsc::Receiver<Buf>,
 
-    fmt: TimeFormatter<14, 4>,
+    fmt: TimeFormatter<LINE_WIDTH_INCL_NEWLINE, 4>,
 }
 
 impl OutputFile {
@@ -83,29 +85,48 @@ impl OutputFile {
         }
     }
 
+    #[allow(dead_code)]
     #[inline]
     pub fn write_u64(&mut self, v: u64) -> io::Result<()> {
         self.fmt.serialized_bytes(v);
         let line = &self.fmt.last_serialized;
+        Self::do_write_bytes(
+            line,
+            &mut self.cur_buf,
+            &self.buf_pool,
+            &self.io_chan.as_ref().unwrap(),
+        )
+    }
 
-        let buf = self.cur_buf.get_ref();
-        let cap = buf.len() - self.cur_buf.position() as usize;
+    #[inline]
+    pub fn write_bytes(&mut self, line: &[u8; LINE_WIDTH_INCL_NEWLINE]) -> io::Result<()> {
+        Self::do_write_bytes(
+            line,
+            &mut self.cur_buf,
+            &self.buf_pool,
+            &self.io_chan.as_ref().unwrap(),
+        )
+    }
+
+    fn do_write_bytes(
+        line: &[u8; LINE_WIDTH_INCL_NEWLINE],
+        cur_buf: &mut Cursor<Box<[u8]>>,
+        buf_pool: &mpsc::Receiver<Buf>,
+        io_chan: &mpsc::Sender<Buf>,
+    ) -> io::Result<()> {
+        let buf = cur_buf.get_ref();
+        let cap = buf.len() - cur_buf.position() as usize;
         if cap < line.len() {
             let (partial, rem) = line.split_at(cap);
-            let wr = self.cur_buf.write(partial).unwrap();
+            let wr = cur_buf.write(partial).unwrap();
             assert_eq!(wr, partial.len(), "write_bytes: partial: short write");
-            Self::flush(
-                &mut self.cur_buf,
-                &self.buf_pool,
-                self.io_chan.as_ref().unwrap(),
-            )
-            .expect("write_bytes: flush failed");
-            let wr = self.cur_buf.write(rem).unwrap();
+            Self::flush(cur_buf, &buf_pool, io_chan).expect("write_bytes: flush failed");
+            let wr = cur_buf.write(rem).unwrap();
             assert_eq!(wr, rem.len(), "write_bytes: partial: short write");
             return Ok(());
         }
 
-        self.cur_buf.write(line).map(|_| ())
+        cur_buf.write(line).map(|_| ())
     }
 
     fn flush(
@@ -150,12 +171,14 @@ impl Drop for OutputFile {
     }
 }
 
+#[allow(dead_code)]
 struct TimeFormatter<const LINE_WIDTH: usize, const N: usize> {
     last_prefix: u64,
     last_serialized: [u8; LINE_WIDTH],
 }
 
 // 2 digit decimal look up table
+#[allow(dead_code)]
 static DEC_DIGITS_LUT: &[u8; 200] = b"0001020304050607080910111213141516171819\
       2021222324252627282930313233343536373839\
       4041424344454647484950515253545556575859\
@@ -169,6 +192,7 @@ impl<const LINE_WIDTH: usize> TimeFormatter<LINE_WIDTH, 4> {
             last_serialized: "0123456789abc\n".as_bytes().try_into().unwrap(),
         }
     }
+    #[allow(dead_code)]
     fn serialized_bytes(&mut self, v: u64) {
         let d = 10_000_u64;
         let prefix = v / d;

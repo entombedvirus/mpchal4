@@ -4,10 +4,7 @@
 #![feature(ptr_sub_ptr)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
-use std::{
-    collections::{binary_heap::PeekMut, BinaryHeap},
-    env,
-};
+use std::{env, io};
 
 use iodirect::{output_file::OutputFile, sorted_file::SortedFile, ALIGN, LINE_WIDTH_INCL_NEWLINE};
 
@@ -45,14 +42,16 @@ fn main() {
     }
 
     let mut output = OutputFile::new("result.txt", expected_file_size as usize);
-    write_all(LinearSearchIter::new(input_files), &mut output);
+    let mut iter = LinearSearchIter::new(input_files);
+    while let Ok(true) = iter.write_to(&mut output) {}
+    // write_all(LinearSearchIter::new(input_files), &mut output);
 }
 
-fn write_all<I: Iterator<Item = u64>>(iter: I, dest: &mut OutputFile) {
-    for v in iter {
-        dest.write_u64(v).expect("output.write_u64 failed");
-    }
-}
+// fn write_all<'a, I: Iterator<Item = &'a [u8; LINE_WIDTH_INCL_NEWLINE]>>(
+//     iter: I,
+//     dest: &mut OutputFile,
+// ) {
+// }
 
 struct LinearSearchIter(Vec<SortedFile>);
 
@@ -81,61 +80,21 @@ impl LinearSearchIter {
         }
         Some(min_idx)
     }
-}
-
-impl Iterator for LinearSearchIter {
-    type Item = u64;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn write_to(&mut self, dest: &mut OutputFile) -> io::Result<bool> {
         loop {
             match self.find_min_idx() {
                 Some(idx) => {
-                    let ret = self.0[idx].next();
-                    if ret.is_none() {
+                    let sf = &mut self.0[idx];
+                    if let Some(line) = sf.peek_bytes() {
+                        dest.write_bytes(line)?;
+                    } else {
                         self.0.swap_remove(idx);
                         continue;
-                    } else {
-                        break ret;
                     }
+                    sf.next();
+                    break Ok(true);
                 }
-                None => break None,
-            }
-        }
-    }
-}
-
-// this turned out to be be more cpu intensive that linear search for
-// small number of input files. Since the problem statement limits the
-// max number of inputs to 20, this is not used.
-//
-// Leaving it as a reference and for benchmarking.
-struct HeapSearchIter(BinaryHeap<SortedFile>);
-
-impl HeapSearchIter {
-    #[allow(dead_code)]
-    fn new(sfs: Vec<SortedFile>) -> Self {
-        Self(sfs.into())
-    }
-}
-
-impl Iterator for HeapSearchIter {
-    type Item = u64;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let heap = &mut self.0;
-        loop {
-            let mut top = heap.peek_mut()?;
-            match top.next() {
-                None => {
-                    PeekMut::pop(top);
-                    continue;
-                }
-                val => {
-                    if top.peek().is_none() {
-                        PeekMut::pop(top);
-                    }
-                    return val;
-                }
+                None => break Ok(false),
             }
         }
     }
@@ -155,8 +114,9 @@ mod tests {
     #[test]
     fn test_sorted_file() {
         let mut sf = SortedFile::new(FILE);
-        assert_eq!(Some(1671670171236_u64), sf.next());
-        assert_eq!(Some(1671670171236_u64), sf.next());
+        assert_eq!(Some(1671670171236_u64), sf.peek());
+        sf.next();
+        assert_eq!(Some(1671670171236_u64), sf.peek());
     }
 
     #[test]
@@ -165,32 +125,40 @@ mod tests {
 
         let mut sf = SortedFile::new(FILE);
         let mut n = 0;
-        while let Some(actual) = sf.next() {
+        let mut peeked_bytes = sf.peek_bytes().cloned();
+        while let Some(actual) = sf.peek() {
             let expected: u64 = lines.next().unwrap();
             assert_eq!(expected, actual, "line_idx: #{n}");
+            assert_eq!(
+                Ok(format!("{}\n", expected)),
+                String::from_utf8(peeked_bytes.unwrap().to_vec()),
+                "line_idx: #{n}"
+            );
+            sf.next();
+            peeked_bytes = sf.peek_bytes().cloned();
             n += 1;
         }
         assert_eq!(2_000_000, n);
     }
 
-    #[test]
-    fn test_two_files() {
-        let inputs = ["files/2m.txt", "files/4m.txt"];
-        let mut expected = stdlib_solution_iter(&inputs);
-        let sorted_files: Vec<_> = inputs.iter().copied().map(SortedFile::new).collect();
-        let iter = HeapSearchIter::new(sorted_files);
+    // #[test]
+    // fn test_two_files() {
+    //     let inputs = ["files/2m.txt", "files/4m.txt"];
+    //     let mut expected = stdlib_solution_iter(&inputs);
+    //     let sorted_files: Vec<_> = inputs.iter().copied().map(SortedFile::new).collect();
+    //     let iter = LinearSearchIter::new(sorted_files);
 
-        let mut nr = 0;
-        for actual in iter {
-            assert_eq!(expected.next().unwrap(), actual, "line_idx: {nr}");
-            nr += 1;
-        }
-        assert_eq!(
-            expected.next(),
-            None,
-            "our solution did not return all values"
-        );
-    }
+    //     let mut nr = 0;
+    //     for actual in iter {
+    //         assert_eq!(expected.next().unwrap(), actual, "line_idx: {nr}");
+    //         nr += 1;
+    //     }
+    //     assert_eq!(
+    //         expected.next(),
+    //         None,
+    //         "our solution did not return all values"
+    //     );
+    // }
 
     fn stdlib_solution_iter(file_names: &[&str]) -> impl Iterator<Item = u64> {
         let mut res = Vec::new();

@@ -66,13 +66,22 @@ impl SortedFile {
     }
 
     #[inline]
-    pub fn next(&mut self) -> Option<u64> {
-        let ret = self.peek();
-        if ret.is_some() {
+    pub fn next(&mut self) {
+        if self.parsed_line_pos < self.parsed_lines.len() {
             self.parsed_line_pos += 1;
             self.fill_parsed_lines();
         }
-        ret
+    }
+
+    #[inline]
+    pub fn peek_bytes(&self) -> Option<&[u8; LINE_WIDTH_INCL_NEWLINE]> {
+        if self.parsed_line_pos >= self.parsed_lines.len() {
+            return None;
+        }
+        let start = self.pos + self.parsed_line_pos * LINE_WIDTH_INCL_NEWLINE;
+        self.aligned_buf
+            .get(start..start + LINE_WIDTH_INCL_NEWLINE)
+            .map(|slice| slice.try_into().unwrap())
     }
 
     fn fill_parsed_lines(&mut self) {
