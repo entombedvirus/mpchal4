@@ -213,7 +213,7 @@ fn new_buf() -> Buf {
 
 #[cfg(test)]
 mod tests {
-    use super::output_file::*;
+    use super::*;
 
     #[test]
     fn test_time_formatter() {

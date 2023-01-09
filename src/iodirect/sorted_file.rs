@@ -60,26 +60,25 @@ impl SortedFile {
         ret
     }
 
-    pub fn peek(&mut self) -> Option<u64> {
-        match self.parsed_lines.get(self.parsed_line_pos) {
-            Some(val) => Some(*val),
-            None => {
-                self.fill_parsed_lines();
-                self.parsed_lines.get(self.parsed_line_pos).copied()
-            }
-        }
+    #[inline]
+    pub fn peek(&self) -> Option<u64> {
+        self.parsed_lines.get(self.parsed_line_pos).copied()
     }
 
+    #[inline]
     pub fn next(&mut self) -> Option<u64> {
         let ret = self.peek();
         if ret.is_some() {
             self.parsed_line_pos += 1;
+            self.fill_parsed_lines();
         }
         ret
     }
 
     fn fill_parsed_lines(&mut self) {
-        assert_eq!(self.parsed_line_pos, self.parsed_lines.len());
+        if self.parsed_line_pos < self.parsed_lines.len() {
+            return;
+        }
 
         self.parsed_line_pos = 0;
         self.parsed_lines.clear();
@@ -134,3 +133,27 @@ impl SortedFile {
         }
     }
 }
+
+impl PartialOrd for SortedFile {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // we want a min heap and stdlib does max heap
+        Some(self.cmp(other).reverse())
+    }
+}
+
+impl Ord for SortedFile {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.peek().cmp(&other.peek())
+    }
+}
+
+impl PartialEq for SortedFile {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.peek() == other.peek()
+    }
+}
+
+impl Eq for SortedFile {}
