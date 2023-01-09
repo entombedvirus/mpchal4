@@ -10,6 +10,4 @@ debug = 1
 
 [dependencies]
 libc = "0.2.139"
-memchr = "2.5.0"
-rio = "0.9.4"
 rustix = { version = "0.36.6", features = ["default", "fs"] }

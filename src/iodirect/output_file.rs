@@ -6,7 +6,7 @@ use std::{
     sync::mpsc,
 };
 
-use rustix::fs::{FileExt, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 
 use super::LINE_WIDTH_INCL_NEWLINE;
 
