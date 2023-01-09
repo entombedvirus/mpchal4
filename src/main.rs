@@ -42,20 +42,13 @@ fn main() {
     }
 
     let mut output = OutputFile::new("result.txt", expected_file_size as usize);
-    let mut iter = LinearSearchIter::new(input_files);
-    while let Ok(true) = iter.write_to(&mut output) {}
-    // write_all(LinearSearchIter::new(input_files), &mut output);
+    let mut wr = SortingWriter::new(input_files);
+    wr.write_to(&mut output).unwrap();
 }
 
-// fn write_all<'a, I: Iterator<Item = &'a [u8; LINE_WIDTH_INCL_NEWLINE]>>(
-//     iter: I,
-//     dest: &mut OutputFile,
-// ) {
-// }
+struct SortingWriter(Vec<SortedFile>);
 
-struct LinearSearchIter(Vec<SortedFile>);
-
-impl LinearSearchIter {
+impl SortingWriter {
     fn new(sfs: Vec<SortedFile>) -> Self {
         Self(sfs)
     }
@@ -80,21 +73,20 @@ impl LinearSearchIter {
         }
         Some(min_idx)
     }
-    fn write_to(&mut self, dest: &mut OutputFile) -> io::Result<bool> {
+
+    fn write_to(&mut self, dest: &mut OutputFile) -> io::Result<()> {
         loop {
             match self.find_min_idx() {
                 Some(idx) => {
                     let sf = &mut self.0[idx];
                     if let Some(line) = sf.peek_bytes() {
                         dest.write_bytes(line)?;
+                        sf.next();
                     } else {
                         self.0.swap_remove(idx);
-                        continue;
                     }
-                    sf.next();
-                    break Ok(true);
                 }
-                None => break Ok(false),
+                None => break Ok(()),
             }
         }
     }
@@ -141,24 +133,43 @@ mod tests {
         assert_eq!(2_000_000, n);
     }
 
-    // #[test]
-    // fn test_two_files() {
-    //     let inputs = ["files/2m.txt", "files/4m.txt"];
-    //     let mut expected = stdlib_solution_iter(&inputs);
-    //     let sorted_files: Vec<_> = inputs.iter().copied().map(SortedFile::new).collect();
-    //     let iter = LinearSearchIter::new(sorted_files);
+    #[test]
+    fn test_two_files() {
+        let inputs = ["files/2m.txt", "files/4m.txt"];
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("mpchal4.tmp.txt");
 
-    //     let mut nr = 0;
-    //     for actual in iter {
-    //         assert_eq!(expected.next().unwrap(), actual, "line_idx: {nr}");
-    //         nr += 1;
-    //     }
-    //     assert_eq!(
-    //         expected.next(),
-    //         None,
-    //         "our solution did not return all values"
-    //     );
-    // }
+        {
+            let sorted_files: Vec<_> = inputs.iter().copied().map(SortedFile::new).collect();
+            let expected_file_size: usize =
+                sorted_files.iter().map(|sf| sf.file_size as usize).sum();
+            let mut wr = SortingWriter::new(sorted_files);
+            let mut output = {
+                OutputFile::new(
+                    temp_file.as_path().to_str().unwrap(),
+                    expected_file_size as usize,
+                )
+            };
+            wr.write_to(&mut output).unwrap();
+        }
+
+        let mut expected = stdlib_solution_iter(&inputs);
+        let actual = BufReader::new(fs::File::open(&temp_file).unwrap()).lines();
+        let mut nr = 0;
+        for line in actual {
+            assert_eq!(
+                expected.next().unwrap().to_string(),
+                line.unwrap(),
+                "line_idx: {nr}"
+            );
+            nr += 1;
+        }
+        assert_eq!(
+            expected.next(),
+            None,
+            "our solution did not return all values"
+        );
+    }
 
     fn stdlib_solution_iter(file_names: &[&str]) -> impl Iterator<Item = u64> {
         let mut res = Vec::new();
