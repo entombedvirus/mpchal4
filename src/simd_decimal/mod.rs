@@ -10,6 +10,49 @@ use std::{
 const REG_BYTES: usize = 16;
 
 #[inline]
+pub fn parse_incomplete<const N: usize, const LINE_WIDTH: usize>(
+    inputs: &[u8],
+    outputs: &mut Vec<u128>,
+) {
+    outputs.reserve(inputs.len() + 1);
+    let mut chunker = ChunkerIter::<LINE_WIDTH, REG_BYTES, N>::new(inputs);
+    let mut output_ptr = outputs.as_mut_ptr_range().end;
+    for chunk in &mut chunker {
+        for i in 0..N {
+            unsafe {
+                do_parse_incomplete::<LINE_WIDTH>(chunk[i], output_ptr);
+                output_ptr = output_ptr.add(1);
+            }
+        }
+    }
+    unsafe { outputs.set_len(output_ptr.sub_ptr(outputs.as_ptr())) };
+    unsafe {
+        for rem in chunker.remainder() {
+            let ascii_num_wo_nl = rem.get_unchecked(..LINE_WIDTH - 1);
+            let mut bytes = [0; 16];
+            bytes[3..].copy_from_slice(ascii_num_wo_nl);
+            bytes.reverse();
+            let val = u128::from_le_bytes(bytes);
+            outputs.push(val);
+        }
+    }
+    // outputs.extend(chunker.remainder().map(parse_num_with_newline));
+}
+
+// Copied from https://github.com/vgatherps/simd_decimal/blob/main/src/parser_sse.rs#L16 and
+// modified. See LICENSE for compliance details.
+#[inline]
+unsafe fn do_parse_incomplete<const LINE_WIDTH: usize>(input: ParseInput, output: *mut u128) {
+    let ascii_num_wo_nl = input.get_unchecked(..LINE_WIDTH - 1);
+    let mut bytes = [0; 16];
+    bytes[3..].copy_from_slice(ascii_num_wo_nl);
+    bytes.reverse();
+    std::ptr::copy_nonoverlapping::<u128>(bytes.as_ptr() as *const u128, output, 1);
+    // let val = u128::from_le_bytes(bytes);
+    // output.write(val);
+}
+
+#[inline]
 pub fn parse_decimals<const N: usize, const LINE_WIDTH: usize>(
     inputs: &[u8],
     outputs: &mut Vec<u64>,

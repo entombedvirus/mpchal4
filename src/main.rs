@@ -65,8 +65,8 @@ impl SortingWriter {
             match sf.peek() {
                 None => return Some(idx),
                 Some(val) => {
-                    if val < min {
-                        min = val;
+                    if val < &min {
+                        min = *val;
                         min_idx = idx;
                     }
                 }
