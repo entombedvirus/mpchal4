@@ -4,6 +4,7 @@
 #![feature(ptr_sub_ptr)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
+#![feature(portable_simd)]
 use std::{env, io};
 
 use iodirect::{output_file::OutputFile, sorted_file::SortedFile, ALIGN, LINE_WIDTH_INCL_NEWLINE};
@@ -56,7 +57,7 @@ impl SortingWriter {
     fn find_min_idx(&self) -> Option<usize> {
         let files = &self.0;
         let mut min_idx: usize = 0;
-        let mut min: u64 = u64::MAX;
+        let mut min = u128::MAX;
         if files.is_empty() {
             return None;
         }
@@ -106,9 +107,9 @@ mod tests {
     #[test]
     fn test_sorted_file() {
         let mut sf = SortedFile::new(FILE);
-        assert_eq!(Some(1671670171236_u64), sf.peek());
+        assert_eq!(Some(1671670171236), sf.peek());
         sf.next();
-        assert_eq!(Some(1671670171236_u64), sf.peek());
+        assert_eq!(Some(1671670171236), sf.peek());
     }
 
     #[test]
@@ -119,7 +120,7 @@ mod tests {
         let mut n = 0;
         let mut peeked_bytes = sf.peek_bytes().cloned();
         while let Some(actual) = sf.peek() {
-            let expected: u64 = lines.next().unwrap();
+            let expected = lines.next().unwrap();
             assert_eq!(expected, actual, "line_idx: #{n}");
             assert_eq!(
                 Ok(format!("{}\n", expected)),
@@ -171,11 +172,11 @@ mod tests {
         );
     }
 
-    fn stdlib_solution_iter(file_names: &[&str]) -> impl Iterator<Item = u64> {
+    fn stdlib_solution_iter(file_names: &[&str]) -> impl Iterator<Item = u128> {
         let mut res = Vec::new();
         for f in file_names {
             let lines = BufReader::new(fs::File::open(f).unwrap()).lines();
-            let lines = lines.map(|x| x.unwrap().parse::<u64>().unwrap());
+            let lines = lines.map(|x| x.unwrap().parse::<u128>().unwrap());
             res.extend(lines);
         }
         res.sort();
