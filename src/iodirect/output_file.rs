@@ -25,7 +25,7 @@ impl OutputFile {
             .write(true)
             .create(true)
             .truncate(true)
-            .custom_flags(libc::O_DIRECT)
+            // .custom_flags(libc::O_DIRECT)
             .open(path)
             .expect("failed to create result.txt");
         rustix::fs::fallocate(
