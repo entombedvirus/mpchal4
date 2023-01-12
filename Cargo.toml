@@ -10,4 +10,5 @@ debug = 1
 
 [dependencies]
 libc = "0.2.139"
-rustix = { version = "0.36.6", features = ["default", "fs"] }
+rio = "0.9.4"
+rustix = { version = "0.36.6", features = ["default", "fs" ] }

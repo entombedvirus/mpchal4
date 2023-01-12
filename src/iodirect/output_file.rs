@@ -1,5 +1,9 @@
 use crate::iodirect::ALIGN;
 use crate::iodirect::CHUNK_SIZE;
+use crate::iodirect::LINE_WIDTH_INCL_NEWLINE;
+use std::path::Path;
+use std::sync::mpsc::RecvError;
+use std::sync::mpsc::TryRecvError;
 use std::{
     fs,
     io::{self, Cursor, Write},
@@ -8,7 +12,7 @@ use std::{
 
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 
-use super::LINE_WIDTH_INCL_NEWLINE;
+type Buf = Cursor<Box<[u8]>>;
 
 pub struct OutputFile {
     cur_buf: Buf,
@@ -20,65 +24,146 @@ pub struct OutputFile {
 }
 
 impl OutputFile {
-    pub fn new(path: &str, expected_file_size: usize) -> OutputFile {
-        let inner = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            // .custom_flags(libc::O_DIRECT)
-            .open(path)
-            .expect("failed to create result.txt");
-        rustix::fs::fallocate(
-            &inner,
-            rustix::fs::FallocateFlags::KEEP_SIZE,
-            0,
-            expected_file_size as u64,
-        )
-        .expect("fallocate failed");
-
+    pub fn new<P: AsRef<Path>>(path: P, expected_file_size: usize) -> OutputFile {
+        let path = path.as_ref().to_owned();
         let (send, recv) = mpsc::channel();
         let io_chan: Option<mpsc::Sender<Buf>> = Some(send.clone());
 
         let (buf_pool_send, buf_pool_recv) = mpsc::channel();
 
         let worker = std::thread::spawn(move || {
-            let mut off = 0_usize;
-            let mut padn = 0_usize;
-            for buf in recv {
-                let mut buf_len = buf.position() as usize;
-                let mut buf = buf.into_inner();
-                if buf_len % ALIGN != 0 {
-                    // this happens on the very last write
-                    assert_eq!(
-                        padn, 0,
-                        "non-aligned write is only expected once at the very end"
-                    );
-                    padn = ALIGN - buf_len % ALIGN;
-                    assert!(
-                        buf_len + padn <= buf.len(),
-                        "buf will resize, which will destroy alignment guarantees"
-                    );
-                    buf[buf_len..buf_len + padn].fill(0_u8);
-                    buf_len += padn;
-                }
-                inner
-                    .write_all_at(&buf[..buf_len], off as u64)
-                    .expect("worker: write_all_at failed");
-                off += buf_len;
+            let inner = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                // .custom_flags(libc::O_DIRECT)
+                .open(path)
+                .expect("failed to create result.txt");
+            rustix::fs::fallocate(
+                &inner,
+                rustix::fs::FallocateFlags::KEEP_SIZE,
+                0,
+                expected_file_size as u64,
+            )
+            .expect("fallocate failed");
 
-                if let Err(err) = buf_pool_send.send(Cursor::new(buf)) {
-                    eprintln!("failed to send buf back in pool: {err}");
+            const Q_DEPTH: usize = 256;
+
+            struct Payload {
+                offset: usize,
+                bytes: Box<[u8]>,
+            }
+            struct Batch {
+                q: Vec<Payload>,
+                off: usize,
+                padn: usize,
+
+                ring: rio::Rio,
+                file: fs::File,
+
+                buf_pool_recycle: mpsc::Sender<Buf>,
+            }
+            impl Batch {
+                fn new(file: fs::File, buf_recycle: mpsc::Sender<Buf>) -> Self {
+                    Self {
+                        q: Vec::with_capacity(Q_DEPTH),
+                        off: 0,
+                        padn: 0,
+                        ring: rio::new().expect("failed to create io_uring"),
+                        file,
+                        buf_pool_recycle: buf_recycle,
+                    }
+                }
+
+                fn push(&mut self, buf: Buf) {
+                    let batch = &mut self.q;
+                    let padn = self.padn;
+                    let mut buf_len = buf.position() as usize;
+                    let mut buf = buf.into_inner();
+                    if buf_len % ALIGN != 0 {
+                        // this happens on the very last write
+                        assert_eq!(
+                            padn, 0,
+                            "non-aligned write is only expected once at the very end"
+                        );
+                        self.padn = ALIGN - buf_len % ALIGN;
+                        assert!(
+                            buf_len + padn <= buf.len(),
+                            "buf will resize, which will destroy alignment guarantees"
+                        );
+                        buf[buf_len..buf_len + padn].fill(0_u8);
+                        buf_len += padn;
+                    }
+                    batch.push(Payload {
+                        offset: self.off,
+                        bytes: buf,
+                    });
+                    self.off += buf_len;
+                }
+
+                fn flush(&mut self) {
+                    if self.q.len() == 0 {
+                        return;
+                    }
+                    let completions = self.q.iter().map(|payload| {
+                        self.ring
+                            .write_at(&self.file, &payload.bytes, payload.offset as u64)
+                    });
+                    for c in completions {
+                        c.wait().expect("output file: worker: io failure");
+                        // TODO: assert not short write
+                    }
+                    for payload in self.q.drain(..) {
+                        if let Err(err) = self.buf_pool_recycle.send(Cursor::new(payload.bytes)) {
+                            eprintln!("failed to send buf back in pool: {err}");
+                        }
+                    }
+                }
+
+                fn clear(&mut self) {
+                    self.q.clear();
+                }
+
+                fn len(&self) -> usize {
+                    self.q.len()
+                }
+
+                fn capacity(&self) -> usize {
+                    self.q.capacity()
+                }
+            }
+
+            let mut batch = Batch::new(inner, buf_pool_send);
+            loop {
+                batch.clear();
+                let res = recv.recv();
+                match res {
+                    Ok(buf) => {
+                        batch.push(buf);
+                        // optimistically try to get N more things
+                        while batch.len() < batch.capacity() {
+                            if let Ok(buf) = recv.try_recv() {
+                                batch.push(buf);
+                            } else {
+                                break;
+                            }
+                        }
+                        batch.flush();
+                        continue;
+                    }
+                    Err(RecvError) => break,
                 }
             }
 
             // truncate file to expected size since we might've
             // written padding zero bytes for O_DIRECT alignment
-            rustix::fs::ftruncate(&inner, (off - padn) as u64).expect("ftruncate failed");
+            rustix::fs::ftruncate(&batch.file, (batch.off - batch.padn) as u64)
+                .expect("ftruncate failed");
         });
 
         Self {
             io_chan,
-            cur_buf: new_buf(),
+            cur_buf: Self::new_buf(),
             worker: Some(worker),
             buf_pool: buf_pool_recv,
             fmt: TimeFormatter::new(),
@@ -140,11 +225,21 @@ impl OutputFile {
 
         let new_buf_to_use = match buf_pool.try_recv() {
             Ok(buf) => buf,
-            Err(_) => new_buf(),
+            Err(_) => Self::new_buf(),
         };
         let cur = std::mem::replace(cur_buf, new_buf_to_use);
         io_chan.send(cur).unwrap();
         Ok(())
+    }
+
+    fn new_buf() -> Buf {
+        let layout = std::alloc::Layout::from_size_align(CHUNK_SIZE, ALIGN).unwrap();
+        let boxed_slice = unsafe {
+            let ptr = std::alloc::alloc_zeroed(layout);
+            let slice = std::slice::from_raw_parts_mut(ptr, CHUNK_SIZE);
+            Box::from_raw(slice)
+        };
+        Cursor::new(boxed_slice)
     }
 }
 
@@ -221,18 +316,6 @@ impl<const LINE_WIDTH: usize> TimeFormatter<LINE_WIDTH, 4> {
             write!(&mut self.last_serialized[..LINE_WIDTH - 1], "{v}").unwrap();
         }
     }
-}
-
-type Buf = Cursor<Box<[u8]>>;
-
-fn new_buf() -> Buf {
-    let layout = std::alloc::Layout::from_size_align(CHUNK_SIZE, ALIGN).unwrap();
-    let boxed_slice = unsafe {
-        let ptr = std::alloc::alloc_zeroed(layout);
-        let slice = std::slice::from_raw_parts_mut(ptr, CHUNK_SIZE);
-        Box::from_raw(slice)
-    };
-    Cursor::new(boxed_slice)
 }
 
 #[cfg(test)]
