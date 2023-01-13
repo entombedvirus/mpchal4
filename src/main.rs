@@ -107,9 +107,9 @@ mod tests {
     #[test]
     fn test_sorted_file() {
         let mut sf = SortedFile::new(FILE);
-        assert_eq!(Some(1671670171236), sf.peek());
+        assert_eq!(Some(&1671670171236), sf.peek());
         sf.next();
-        assert_eq!(Some(1671670171236), sf.peek());
+        assert_eq!(Some(&1671670171236), sf.peek());
     }
 
     #[test]
@@ -119,7 +119,7 @@ mod tests {
         let mut sf = SortedFile::new(FILE);
         let mut n = 0;
         let mut peeked_bytes = sf.peek_bytes().cloned();
-        while let Some(actual) = sf.peek() {
+        while let Some(&actual) = sf.peek() {
             let expected = lines.next().unwrap();
             assert_eq!(expected, actual, "line_idx: #{n}");
             assert_eq!(
