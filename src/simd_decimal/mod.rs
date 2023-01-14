@@ -1,9 +1,9 @@
 use std::{
     arch::x86_64::{
-        __m128i, _mm_and_si128, _mm_cvtsi128_si64, _mm_loadu_si128, _mm_madd_epi16,
-        _mm_maddubs_epi16, _mm_or_si128, _mm_packs_epi32, _mm_set1_epi8, _mm_setr_epi16,
-        _mm_setr_epi8, _mm_setzero_si128, _mm_shuffle_epi8, _mm_slli_epi16, _mm_slli_si128,
-        _mm_sub_epi8,
+        __m128i, _bswap64, _mm_and_si128, _mm_cvtsi128_si64, _mm_lddqu_si128, _mm_loadu_si128,
+        _mm_madd_epi16, _mm_maddubs_epi16, _mm_or_si128, _mm_packs_epi32, _mm_packus_epi16,
+        _mm_set1_epi8, _mm_setr_epi16, _mm_setr_epi8, _mm_setzero_si128, _mm_shuffle_epi8,
+        _mm_slli_epi16, _mm_slli_si128, _mm_sub_epi8,
     },
     io::BufRead,
     mem::MaybeUninit,
@@ -81,21 +81,19 @@ unsafe fn do_parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
     outputs: &mut [u64; N],
 ) {
     let zero = _mm_set1_epi8(b'0' as i8);
-    let and_mask = _mm_setr_epi8(
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0x00, 0x00, 0x00,
-    );
-    let control = _mm_setr_epi8(12, 10, 8, 6, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1);
     let mut cleaned = [_mm_setzero_si128(); N];
-
     for i in 0..N {
         let a = _mm_loadu_si128(inputs[i] as *const u8 as *const __m128i);
         cleaned[i] = _mm_sub_epi8(a, zero);
     }
 
+    let last3_mask = _mm_setr_epi8(
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0x00, 0x00, 0x00,
+    );
     for i in 0..N {
         // zero out three bytes off the end since that's not part
         // of the number
-        cleaned[i] = _mm_and_si128(cleaned[i], and_mask);
+        cleaned[i] = _mm_and_si128(cleaned[i], last3_mask);
     }
 
     for i in 0..N {
@@ -110,15 +108,20 @@ unsafe fn do_parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
         cleaned[i] = _mm_or_si128(cleaned[i], b);
     }
 
+    let every_other_mask = _mm_setr_epi8(-1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0);
     for i in 0..N {
-        // move the bytes around such that the lower 64bits
-        // contain the number that we want
-        cleaned[i] = _mm_shuffle_epi8(cleaned[i], control);
+        // zero out every other byte so that we can pack into 8bits later
+        cleaned[i] = _mm_and_si128(cleaned[i], every_other_mask);
     }
-
     for i in 0..N {
-        // extract the lower 64bits as a u64
-        outputs[i] = _mm_cvtsi128_si64(cleaned[i]) as u64;
+        // pack 16bits into 8bits
+        cleaned[i] = _mm_packus_epi16(cleaned[i], cleaned[i]);
+    }
+    for i in 0..N {
+        // extract the lo 64bits and swap bytes so that the most
+        // significant 4bits in the right place
+        let lo = _mm_cvtsi128_si64(cleaned[i]);
+        outputs[i] = lo.swap_bytes() as u64;
     }
 }
 
@@ -317,9 +320,10 @@ pub unsafe fn do_parse_decimals<const N: usize>(inputs: &[ParseInput; N], output
 mod tests {
     use std::{
         arch::x86_64::{
-            __m128i, _mm_and_si128, _mm_loadu_si128, _mm_mask_blend_epi8, _mm_maskmoveu_si128,
-            _mm_or_si128, _mm_setzero_si128, _mm_slli_epi16, _mm_slli_si128, _mm_srli_epi16,
-            _mm_srli_si128, _mm_storel_epi64, _mm_unpackhi_epi8, _mm_unpacklo_epi8,
+            __m128i, _bswap64, _mm_and_si128, _mm_lddqu_si128, _mm_loadu_si128,
+            _mm_mask_blend_epi8, _mm_maskmoveu_si128, _mm_or_si128, _mm_packus_epi16,
+            _mm_setzero_si128, _mm_slli_epi16, _mm_slli_si128, _mm_srli_epi16, _mm_srli_si128,
+            _mm_storel_epi64, _mm_storer_pd, _mm_unpackhi_epi8, _mm_unpacklo_epi8,
         },
         ops::{Shr, ShrAssign},
     };
@@ -377,7 +381,7 @@ mod tests {
         }
 
         unsafe {
-            let a: __m128i = _mm_loadu_si128(a as *const u8 as *const __m128i);
+            let a: __m128i = _mm_lddqu_si128(a as *const u8 as *const __m128i);
             eprintln!("a\t: {:02x}", as_portable_simd(a));
 
             let zero = _mm_set1_epi8(b'0' as i8);
@@ -407,16 +411,16 @@ mod tests {
             let a = _mm_or_si128(a, b);
             eprintln!("a|b\t: {:02x}", as_portable_simd(a));
 
-            // move the bytes around such that the lower 64bits
-            // contain the number that we want
-            let control = _mm_setr_epi8(12, 10, 8, 6, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1);
-            let a = _mm_shuffle_epi8(a, control);
-            eprintln!("shuff\t: {:02x}", as_portable_simd(a));
+            let and_mask = _mm_setr_epi8(-1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0);
+            let a = _mm_and_si128(a, and_mask);
+            eprintln!("a&mask\t: {:02x}", as_portable_simd(a));
+            let b = _mm_packus_epi16(a, a);
+            eprintln!("pack\t: {:02x}", as_portable_simd(b));
 
-            // extract the lower 64bits as a u64
-            let dest = _mm_cvtsi128_si64(a);
-            eprintln!("dest\t: {:#02x}", dest);
+            let b = _mm_cvtsi128_si64(b).swap_bytes() as u64;
+            eprintln!("b\t: {:#02x}", b);
+
+            assert_eq!(0x01_23_45_67_89_12_34_00, b);
         }
-        assert!(false)
     }
 }
