@@ -1,7 +1,9 @@
 use std::{
     arch::x86_64::{
-        _mm_cvtsi128_si64, _mm_madd_epi16, _mm_maddubs_epi16, _mm_packs_epi32, _mm_set1_epi8,
-        _mm_setr_epi16, _mm_setr_epi8, _mm_shuffle_epi8, _mm_sub_epi8,
+        __m128i, _mm_and_si128, _mm_cvtsi128_si64, _mm_loadu_si128, _mm_madd_epi16,
+        _mm_maddubs_epi16, _mm_or_si128, _mm_packs_epi32, _mm_set1_epi8, _mm_setr_epi16,
+        _mm_setr_epi8, _mm_setzero_si128, _mm_shuffle_epi8, _mm_slli_epi16, _mm_slli_si128,
+        _mm_sub_epi8,
     },
     io::BufRead,
     mem::MaybeUninit,
@@ -37,6 +39,87 @@ pub fn parse_incomplete<const N: usize, const LINE_WIDTH: usize>(
         }
     }
     // outputs.extend(chunker.remainder().map(parse_num_with_newline));
+}
+
+pub fn parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
+    inputs: &[u8],
+    outputs: &mut Vec<u64>,
+) {
+    let expected_results = inputs.len() / LINE_WIDTH;
+    assert_eq!(inputs.len() % LINE_WIDTH, 0, "only pass complete lines");
+
+    outputs.clear();
+    outputs.reserve(expected_results);
+
+    let mut chunker = ChunkerIter::<LINE_WIDTH, REG_BYTES, N>::new(inputs);
+    let mut i = 0;
+    for chunk in &mut chunker {
+        unsafe {
+            do_parse_packed_4bit::<N, LINE_WIDTH>(
+                &chunk,
+                outputs.get_unchecked_mut(i..i + N).try_into().unwrap(),
+            );
+            i += N;
+        }
+    }
+    unsafe {
+        for rem in chunker.remainder() {
+            let mut buf = [0; REG_BYTES];
+            buf.get_unchecked_mut(..rem.len()).copy_from_slice(rem);
+            do_parse_packed_4bit::<1, LINE_WIDTH>(
+                &[&buf],
+                outputs.get_unchecked_mut(i..i + 1).try_into().unwrap(),
+            );
+            i += 1;
+        }
+        outputs.set_len(expected_results);
+    }
+}
+
+unsafe fn do_parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
+    inputs: &[&[u8; REG_BYTES]; N],
+    outputs: &mut [u64; N],
+) {
+    let zero = _mm_set1_epi8(b'0' as i8);
+    let and_mask = _mm_setr_epi8(
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0x00, 0x00, 0x00,
+    );
+    let control = _mm_setr_epi8(12, 10, 8, 6, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    let mut cleaned = [_mm_setzero_si128(); N];
+
+    for i in 0..N {
+        let a = _mm_loadu_si128(inputs[i] as *const u8 as *const __m128i);
+        cleaned[i] = _mm_sub_epi8(a, zero);
+    }
+
+    for i in 0..N {
+        // zero out three bytes off the end since that's not part
+        // of the number
+        cleaned[i] = _mm_and_si128(cleaned[i], and_mask);
+    }
+
+    for i in 0..N {
+        // shift left by 4bits so that we can do a logical OR
+        // to pack together 2 bytes into 1 byte
+        let b = _mm_slli_epi16(cleaned[i], 4);
+        // shift right by 1 byte so that things line up to do
+        // the OR operation
+        let b = _mm_slli_si128(b, 1);
+        // do the OR operation such that two adjacent bytes
+        // end up getting packed together into one byte
+        cleaned[i] = _mm_or_si128(cleaned[i], b);
+    }
+
+    for i in 0..N {
+        // move the bytes around such that the lower 64bits
+        // contain the number that we want
+        cleaned[i] = _mm_shuffle_epi8(cleaned[i], control);
+    }
+
+    for i in 0..N {
+        // extract the lower 64bits as a u64
+        outputs[i] = _mm_cvtsi128_si64(cleaned[i]) as u64;
+    }
 }
 
 // Copied from https://github.com/vgatherps/simd_decimal/blob/main/src/parser_sse.rs#L16 and
@@ -232,6 +315,15 @@ pub unsafe fn do_parse_decimals<const N: usize>(inputs: &[ParseInput; N], output
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        arch::x86_64::{
+            __m128i, _mm_and_si128, _mm_loadu_si128, _mm_mask_blend_epi8, _mm_maskmoveu_si128,
+            _mm_or_si128, _mm_setzero_si128, _mm_slli_epi16, _mm_slli_si128, _mm_srli_epi16,
+            _mm_srli_si128, _mm_storel_epi64, _mm_unpackhi_epi8, _mm_unpacklo_epi8,
+        },
+        ops::{Shr, ShrAssign},
+    };
+
     use super::*;
 
     #[test]
@@ -274,5 +366,57 @@ mod tests {
             output.set_len(inputs.len());
         };
         assert_eq!(output.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_4bit_packing() {
+        let a: &[u8; 16] = "1234567891234\n16".as_bytes().try_into().unwrap();
+
+        unsafe fn as_portable_simd(x: __m128i) -> std::simd::u8x16 {
+            x.into()
+        }
+
+        unsafe {
+            let a: __m128i = _mm_loadu_si128(a as *const u8 as *const __m128i);
+            eprintln!("a\t: {:02x}", as_portable_simd(a));
+
+            let zero = _mm_set1_epi8(b'0' as i8);
+            let a = _mm_sub_epi8(a, zero);
+            eprintln!("a - 0\t: {:02x}", as_portable_simd(a));
+
+            // zero out three bytes off the end since that's not part
+            // of the number
+            let and_mask = _mm_setr_epi8(
+                -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0x00, 0x00, 0x00,
+            );
+            let a = _mm_and_si128(a, and_mask);
+            eprintln!("a&mask\t: {:02x}", as_portable_simd(a));
+
+            // shift left by 4bits so that we can do a logical OR
+            // to pack together 2 bytes into 1 byte
+            let b = _mm_slli_epi16(a, 4);
+            eprintln!("a<<4\t: {:02x}", as_portable_simd(b));
+
+            // shift right by 1 byte so that things line up to do
+            // the OR operation
+            let b = _mm_slli_si128(b, 1);
+            eprintln!("b>>8\t: {:02x}", as_portable_simd(b));
+
+            // do the OR operation such that two adjacent bytes
+            // end up getting packed together into one byte
+            let a = _mm_or_si128(a, b);
+            eprintln!("a|b\t: {:02x}", as_portable_simd(a));
+
+            // move the bytes around such that the lower 64bits
+            // contain the number that we want
+            let control = _mm_setr_epi8(12, 10, 8, 6, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+            let a = _mm_shuffle_epi8(a, control);
+            eprintln!("shuff\t: {:02x}", as_portable_simd(a));
+
+            // extract the lower 64bits as a u64
+            let dest = _mm_cvtsi128_si64(a);
+            eprintln!("dest\t: {:#02x}", dest);
+        }
+        assert!(false)
     }
 }

@@ -5,6 +5,8 @@
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(portable_simd)]
+#![feature(stdsimd_internal)]
+#![feature(stdsimd)]
 use std::{env, io};
 
 use iodirect::{output_file::OutputFile, sorted_file::SortedFile, ALIGN, LINE_WIDTH_INCL_NEWLINE};
@@ -57,7 +59,7 @@ impl SortingWriter {
     fn find_min_idx(&self) -> Option<usize> {
         let files = &self.0;
         let mut min_idx: usize = 0;
-        let mut min = u128::MAX;
+        let mut min = u64::MAX;
         if files.is_empty() {
             return None;
         }
@@ -172,11 +174,11 @@ mod tests {
         );
     }
 
-    fn stdlib_solution_iter(file_names: &[&str]) -> impl Iterator<Item = u128> {
+    fn stdlib_solution_iter(file_names: &[&str]) -> impl Iterator<Item = u64> {
         let mut res = Vec::new();
         for f in file_names {
             let lines = BufReader::new(fs::File::open(f).unwrap()).lines();
-            let lines = lines.map(|x| x.unwrap().parse::<u128>().unwrap());
+            let lines = lines.map(|x| x.unwrap().parse::<u64>().unwrap());
             res.extend(lines);
         }
         res.sort();

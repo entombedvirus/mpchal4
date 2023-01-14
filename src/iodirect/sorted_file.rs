@@ -13,7 +13,7 @@ use rustix::fs::{MetadataExt, OpenOptionsExt};
 pub struct SortedFile {
     pub file_size: u64,
 
-    parsed_lines: Vec<u128>,
+    parsed_lines: Vec<u64>,
     // top_value_for_cmp: Option<u128>,
     parsed_line_pos: usize,
     partial_line_bytes: usize,
@@ -72,7 +72,7 @@ impl SortedFile {
     // }
 
     #[inline]
-    pub fn peek(&self) -> Option<&u128> {
+    pub fn peek(&self) -> Option<&u64> {
         // self.top_value_for_cmp
         self.parsed_lines.get(self.parsed_line_pos)
     }
@@ -132,10 +132,14 @@ impl SortedFile {
 
         let num_complete_lines = buf.len() / LINE_WIDTH_INCL_NEWLINE;
         self.partial_line_bytes = buf.len() % LINE_WIDTH_INCL_NEWLINE;
-        simd_decimal::parse_incomplete::<1, LINE_WIDTH_INCL_NEWLINE>(
+        simd_decimal::parse_packed_4bit::<6, LINE_WIDTH_INCL_NEWLINE>(
             &buf[..num_complete_lines * LINE_WIDTH_INCL_NEWLINE],
             &mut self.parsed_lines,
         );
+        // simd_decimal::parse_incomplete::<1, LINE_WIDTH_INCL_NEWLINE>(
+        //     &buf[..num_complete_lines * LINE_WIDTH_INCL_NEWLINE],
+        //     &mut self.parsed_lines,
+        // );
         // simd_decimal::parse_decimals::<4, LINE_WIDTH_INCL_NEWLINE>(
         //     &buf[..num_complete_lines * LINE_WIDTH_INCL_NEWLINE],
         //     &mut self.parsed_lines,
