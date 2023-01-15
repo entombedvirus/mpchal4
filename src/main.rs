@@ -4,6 +4,9 @@
 #![feature(ptr_sub_ptr)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
+#![feature(portable_simd)]
+#![feature(stdsimd_internal)]
+#![feature(stdsimd)]
 use std::{env, io};
 
 use iodirect::{output_file::OutputFile, sorted_file::SortedFile, ALIGN, LINE_WIDTH_INCL_NEWLINE};
@@ -56,7 +59,7 @@ impl SortingWriter {
     fn find_min_idx(&self) -> Option<usize> {
         let files = &self.0;
         let mut min_idx: usize = 0;
-        let mut min: u64 = u64::MAX;
+        let mut min = u64::MAX;
         if files.is_empty() {
             return None;
         }
@@ -64,8 +67,8 @@ impl SortingWriter {
             match sf.peek() {
                 None => return Some(idx),
                 Some(val) => {
-                    if val < min {
-                        min = val;
+                    if val < &min {
+                        min = *val;
                         min_idx = idx;
                     }
                 }
@@ -106,9 +109,15 @@ mod tests {
     #[test]
     fn test_sorted_file() {
         let mut sf = SortedFile::new(FILE);
-        assert_eq!(Some(1671670171236_u64), sf.peek());
+        assert_eq!(Some(&0x167167017123600), sf.peek());
         sf.next();
-        assert_eq!(Some(1671670171236_u64), sf.peek());
+        assert_eq!(Some(&0x167167017123600), sf.peek());
+    }
+
+    fn get_4bit_compressed(x: u64) -> u64 {
+        let mut as_str = x.to_string();
+        as_str += "00";
+        u64::from_str_radix(&as_str, 16).unwrap()
     }
 
     #[test]
@@ -118,9 +127,9 @@ mod tests {
         let mut sf = SortedFile::new(FILE);
         let mut n = 0;
         let mut peeked_bytes = sf.peek_bytes().cloned();
-        while let Some(actual) = sf.peek() {
-            let expected: u64 = lines.next().unwrap();
-            assert_eq!(expected, actual, "line_idx: #{n}");
+        while let Some(&actual) = sf.peek() {
+            let expected = lines.next().unwrap();
+            assert_eq!(get_4bit_compressed(expected), actual, "line_idx: #{n}");
             assert_eq!(
                 Ok(format!("{}\n", expected)),
                 String::from_utf8(peeked_bytes.unwrap().to_vec()),

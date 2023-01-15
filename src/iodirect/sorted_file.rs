@@ -47,7 +47,7 @@ impl SortedFile {
         let mut ret = Self {
             file_size,
 
-            parsed_lines: Vec::with_capacity(file_size as usize / LINE_WIDTH_INCL_NEWLINE),
+            parsed_lines: Vec::new(),
             parsed_line_pos: 0,
             partial_line_bytes: 0,
 
@@ -61,13 +61,14 @@ impl SortedFile {
     }
 
     #[inline]
-    pub fn peek(&self) -> Option<u64> {
-        self.parsed_lines.get(self.parsed_line_pos).copied()
+    pub fn peek(&self) -> Option<&u64> {
+        self.parsed_lines.get(self.parsed_line_pos)
     }
 
     #[inline]
     pub fn next(&mut self) {
-        if self.parsed_line_pos < self.parsed_lines.len() {
+        let start = self.parsed_line_pos;
+        if start < self.parsed_lines.len() {
             self.parsed_line_pos += 1;
             self.fill_parsed_lines();
         }
@@ -75,13 +76,15 @@ impl SortedFile {
 
     #[inline]
     pub fn peek_bytes(&self) -> Option<&[u8; LINE_WIDTH_INCL_NEWLINE]> {
-        if self.parsed_line_pos >= self.parsed_lines.len() {
+        let start = self.pos + self.parsed_line_pos * LINE_WIDTH_INCL_NEWLINE;
+        if start + LINE_WIDTH_INCL_NEWLINE > self.filled {
             return None;
         }
-        let start = self.pos + self.parsed_line_pos * LINE_WIDTH_INCL_NEWLINE;
-        self.aligned_buf
-            .get(start..start + LINE_WIDTH_INCL_NEWLINE)
-            .map(|slice| slice.try_into().unwrap())
+        let bytes = unsafe {
+            self.aligned_buf
+                .get_unchecked(start..start + LINE_WIDTH_INCL_NEWLINE)
+        };
+        Some(bytes.try_into().unwrap())
     }
 
     fn fill_parsed_lines(&mut self) {
@@ -89,7 +92,6 @@ impl SortedFile {
             return;
         }
 
-        self.parsed_line_pos = 0;
         self.parsed_lines.clear();
 
         self.pos = iodirect::ALIGN;
@@ -108,7 +110,7 @@ impl SortedFile {
 
         let num_complete_lines = buf.len() / LINE_WIDTH_INCL_NEWLINE;
         self.partial_line_bytes = buf.len() % LINE_WIDTH_INCL_NEWLINE;
-        simd_decimal::parse_decimals::<4, LINE_WIDTH_INCL_NEWLINE>(
+        simd_decimal::parse_packed_4bit::<6, LINE_WIDTH_INCL_NEWLINE>(
             &buf[..num_complete_lines * LINE_WIDTH_INCL_NEWLINE],
             &mut self.parsed_lines,
         );
@@ -118,6 +120,10 @@ impl SortedFile {
         // it to the right place next time
         self.aligned_buf
             .copy_within(self.filled - n..self.filled, 0);
+        self.filled -= n;
+        assert!((self.filled - self.pos) % LINE_WIDTH_INCL_NEWLINE == 0);
+
+        self.parsed_line_pos = 0;
     }
 
     fn fill_buf(&mut self) {
