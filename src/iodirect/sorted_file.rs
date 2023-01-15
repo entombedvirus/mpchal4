@@ -152,8 +152,7 @@ impl SortedFile {
 impl PartialOrd for SortedFile {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        // we want a min heap and stdlib does max heap
-        Some(self.cmp(other).reverse())
+        Some(self.cmp(other))
     }
 }
 

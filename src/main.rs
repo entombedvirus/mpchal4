@@ -56,40 +56,19 @@ impl SortingWriter {
         Self(sfs)
     }
 
-    fn find_min_idx(&self) -> Option<usize> {
-        let files = &self.0;
-        let mut min_idx: usize = 0;
-        let mut min = u64::MAX;
-        if files.is_empty() {
-            return None;
-        }
-        for (idx, sf) in files.iter().enumerate() {
-            match sf.peek() {
-                None => return Some(idx),
-                Some(val) => {
-                    if val < &min {
-                        min = *val;
-                        min_idx = idx;
-                    }
-                }
-            }
-        }
-        Some(min_idx)
-    }
-
     fn write_to(&mut self, dest: &mut OutputFile) -> io::Result<()> {
         loop {
-            match self.find_min_idx() {
-                Some(idx) => {
-                    let sf = &mut self.0[idx];
-                    if let Some(line) = sf.peek_bytes() {
-                        dest.write_bytes(line)?;
-                        sf.next();
-                    } else {
-                        self.0.swap_remove(idx);
-                    }
-                }
+            let min = self
+                .0
+                .iter_mut()
+                .min_by_key(|sf| *sf.peek().unwrap_or(&u64::MAX));
+
+            match min.as_ref().and_then(|min_sf| min_sf.peek_bytes()) {
                 None => break Ok(()),
+                Some(line) => {
+                    dest.write_bytes(line)?;
+                    min.unwrap().next();
+                }
             }
         }
     }
