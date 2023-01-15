@@ -1,5 +1,8 @@
+use rustix::fd::AsRawFd;
+
 use crate::iodirect::ALIGN;
 use crate::iodirect::CHUNK_SIZE;
+use std::error::Error;
 use std::{
     fs,
     io::{self, Cursor, Write},
@@ -11,163 +14,189 @@ use std::os::unix::fs::FileExt;
 use super::LINE_WIDTH_INCL_NEWLINE;
 
 pub struct OutputFile {
-    cur_buf: Buf,
-    io_chan: Option<mpsc::Sender<Buf>>,
-    worker: Option<std::thread::JoinHandle<()>>,
-    buf_pool: mpsc::Receiver<Buf>,
+    mapped_addr: *mut libc::c_void,
+    mapped_len: usize,
 
-    fmt: TimeFormatter<LINE_WIDTH_INCL_NEWLINE, 4>,
+    cur: *mut u8,
+    // cur_buf: Buf,
+    // io_chan: Option<mpsc::Sender<Buf>>,
+    // worker: Option<std::thread::JoinHandle<()>>,
+    // buf_pool: mpsc::Receiver<Buf>,
+    // fmt: TimeFormatter<LINE_WIDTH_INCL_NEWLINE, 4>,
 }
 
 impl OutputFile {
     pub fn new(path: &str, expected_file_size: usize) -> OutputFile {
         let inner = fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             // .custom_flags(libc::O_DIRECT)
             .open(path)
             .expect("failed to create result.txt");
-        rustix::fs::fallocate(
-            &inner,
-            rustix::fs::FallocateFlags::KEEP_SIZE,
-            0,
-            expected_file_size as u64,
-        )
-        .expect("fallocate failed");
+        rustix::fs::ftruncate(&inner, expected_file_size as u64).expect("ftruncate failed");
 
-        let (send, recv) = mpsc::channel();
-        let io_chan: Option<mpsc::Sender<Buf>> = Some(send.clone());
+        let mapped_addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut() as *mut libc::c_void,
+                expected_file_size,
+                libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                inner.as_raw_fd(),
+                0,
+            )
+        };
+        assert!(
+            mapped_addr != libc::MAP_FAILED,
+            "mmap failed: {}",
+            std::io::Error::last_os_error()
+        );
+        let cur = dbg!(mapped_addr as *mut u8);
+        // let (send, recv) = mpsc::channel();
+        // let io_chan: Option<mpsc::Sender<Buf>> = Some(send.clone());
 
-        let (buf_pool_send, buf_pool_recv) = mpsc::channel();
+        // let (buf_pool_send, buf_pool_recv) = mpsc::channel();
 
-        let worker = std::thread::spawn(move || {
-            let mut off = 0_usize;
-            let mut padn = 0_usize;
-            for buf in recv {
-                let mut buf_len = buf.position() as usize;
-                let mut buf = buf.into_inner();
-                if buf_len % ALIGN != 0 {
-                    // this happens on the very last write
-                    assert_eq!(
-                        padn, 0,
-                        "non-aligned write is only expected once at the very end"
-                    );
-                    padn = ALIGN - buf_len % ALIGN;
-                    assert!(
-                        buf_len + padn <= buf.len(),
-                        "buf will resize, which will destroy alignment guarantees"
-                    );
-                    buf[buf_len..buf_len + padn].fill(0_u8);
-                    buf_len += padn;
-                }
-                inner
-                    .write_all_at(&buf[..buf_len], off as u64)
-                    .expect("worker: write_all_at failed");
-                off += buf_len;
+        // let worker = std::thread::spawn(move || {
+        //     let mut off = 0_usize;
+        //     let mut padn = 0_usize;
+        //     for buf in recv {
+        //         let mut buf_len = buf.position() as usize;
+        //         let mut buf = buf.into_inner();
+        //         if buf_len % ALIGN != 0 {
+        //             // this happens on the very last write
+        //             assert_eq!(
+        //                 padn, 0,
+        //                 "non-aligned write is only expected once at the very end"
+        //             );
+        //             padn = ALIGN - buf_len % ALIGN;
+        //             assert!(
+        //                 buf_len + padn <= buf.len(),
+        //                 "buf will resize, which will destroy alignment guarantees"
+        //             );
+        //             buf[buf_len..buf_len + padn].fill(0_u8);
+        //             buf_len += padn;
+        //         }
+        //         inner
+        //             .write_all_at(&buf[..buf_len], off as u64)
+        //             .expect("worker: write_all_at failed");
+        //         off += buf_len;
 
-                if let Err(err) = buf_pool_send.send(Cursor::new(buf)) {
-                    eprintln!("failed to send buf back in pool: {err}");
-                }
-            }
+        //         if let Err(err) = buf_pool_send.send(Cursor::new(buf)) {
+        //             eprintln!("failed to send buf back in pool: {err}");
+        //         }
+        //     }
 
-            // truncate file to expected size since we might've
-            // written padding zero bytes for O_DIRECT alignment
-            rustix::fs::ftruncate(&inner, (off - padn) as u64).expect("ftruncate failed");
-        });
+        //     // truncate file to expected size since we might've
+        //     // written padding zero bytes for O_DIRECT alignment
+        //     rustix::fs::ftruncate(&inner, (off - padn) as u64).expect("ftruncate failed");
+        // });
 
         Self {
-            io_chan,
-            cur_buf: new_buf(),
-            worker: Some(worker),
-            buf_pool: buf_pool_recv,
-            fmt: TimeFormatter::new(),
+            mapped_addr,
+            mapped_len: expected_file_size,
+            cur,
+            // io_chan,
+            // cur_buf: new_buf(),
+            // worker: Some(worker),
+            // buf_pool: buf_pool_recv,
+            // fmt: TimeFormatter::new(),
         }
     }
 
-    #[allow(dead_code)]
-    #[inline]
-    pub fn write_u64(&mut self, v: u64) -> io::Result<()> {
-        self.fmt.serialized_bytes(v);
-        let line = &self.fmt.last_serialized;
-        Self::do_write_bytes(
-            line,
-            &mut self.cur_buf,
-            &self.buf_pool,
-            &self.io_chan.as_ref().unwrap(),
-        )
-    }
+    // #[allow(dead_code)]
+    // #[inline]
+    // pub fn write_u64(&mut self, v: u64) -> io::Result<()> {
+    //     self.fmt.serialized_bytes(v);
+    //     let line = &self.fmt.last_serialized;
+    //     Self::do_write_bytes(
+    //         line,
+    //         &mut self.cur_buf,
+    //         &self.buf_pool,
+    //         &self.io_chan.as_ref().unwrap(),
+    //     )
+    // }
 
     #[inline]
     pub fn write_bytes(&mut self, line: &[u8; LINE_WIDTH_INCL_NEWLINE]) -> io::Result<()> {
-        Self::do_write_bytes(
-            line,
-            &mut self.cur_buf,
-            &self.buf_pool,
-            &self.io_chan.as_ref().unwrap(),
-        )
-    }
-
-    fn do_write_bytes(
-        line: &[u8; LINE_WIDTH_INCL_NEWLINE],
-        cur_buf: &mut Cursor<Box<[u8]>>,
-        buf_pool: &mpsc::Receiver<Buf>,
-        io_chan: &mpsc::Sender<Buf>,
-    ) -> io::Result<()> {
-        let buf = cur_buf.get_ref();
-        let cap = buf.len() - cur_buf.position() as usize;
-        if cap < line.len() {
-            let (partial, rem) = line.split_at(cap);
-            let wr = cur_buf.write(partial).unwrap();
-            assert_eq!(wr, partial.len(), "write_bytes: partial: short write");
-            Self::flush(cur_buf, &buf_pool, io_chan).expect("write_bytes: flush failed");
-            let wr = cur_buf.write(rem).unwrap();
-            assert_eq!(wr, rem.len(), "write_bytes: partial: short write");
-            return Ok(());
+        unsafe {
+            std::ptr::copy_nonoverlapping(line as *const _, self.cur, line.len());
+            self.cur = self.cur.add(line.len());
         }
-
-        cur_buf.write(line).map(|_| ())
-    }
-
-    fn flush(
-        cur_buf: &mut Cursor<Box<[u8]>>,
-        buf_pool: &mpsc::Receiver<Buf>,
-        io_chan: &mpsc::Sender<Buf>,
-    ) -> io::Result<()> {
-        if cur_buf.position() == 0 {
-            return Ok(());
-        }
-
-        let new_buf_to_use = match buf_pool.try_recv() {
-            Ok(buf) => buf,
-            Err(_) => new_buf(),
-        };
-        let cur = std::mem::replace(cur_buf, new_buf_to_use);
-        io_chan.send(cur).unwrap();
         Ok(())
+
+        // Self::do_write_bytes(
+        //     line,
+        //     &mut self.cur_buf,
+        //     &self.buf_pool,
+        //     &self.io_chan.as_ref().unwrap(),
+        // )
     }
+
+    // fn do_write_bytes(
+    //     line: &[u8; LINE_WIDTH_INCL_NEWLINE],
+    //     cur_buf: &mut Cursor<Box<[u8]>>,
+    //     buf_pool: &mpsc::Receiver<Buf>,
+    //     io_chan: &mpsc::Sender<Buf>,
+    // ) -> io::Result<()> {
+    //     let buf = cur_buf.get_ref();
+    //     let cap = buf.len() - cur_buf.position() as usize;
+    //     if cap < line.len() {
+    //         let (partial, rem) = line.split_at(cap);
+    //         let wr = cur_buf.write(partial).unwrap();
+    //         assert_eq!(wr, partial.len(), "write_bytes: partial: short write");
+    //         Self::flush(cur_buf, &buf_pool, io_chan).expect("write_bytes: flush failed");
+    //         let wr = cur_buf.write(rem).unwrap();
+    //         assert_eq!(wr, rem.len(), "write_bytes: partial: short write");
+    //         return Ok(());
+    //     }
+
+    // cur_buf.write(line).map(|_| ())
+    // }
+
+    // fn flush(
+    //     cur_buf: &mut Cursor<Box<[u8]>>,
+    //     buf_pool: &mpsc::Receiver<Buf>,
+    //     io_chan: &mpsc::Sender<Buf>,
+    // ) -> io::Result<()> {
+    //     if cur_buf.position() == 0 {
+    //         return Ok(());
+    //     }
+
+    // let new_buf_to_use = match buf_pool.try_recv() {
+    //     Ok(buf) => buf,
+    //     Err(_) => new_buf(),
+    // };
+    // let cur = std::mem::replace(cur_buf, new_buf_to_use);
+    // io_chan.send(cur).unwrap();
+    // Ok(())
+    // }
 }
 
 impl Drop for OutputFile {
     fn drop(&mut self) {
-        // write buffered lines, if any
-        Self::flush(
-            &mut self.cur_buf,
-            &self.buf_pool,
-            self.io_chan.as_ref().unwrap(),
-        )
-        .expect("write_bytes: flush failed");
+        if !self.mapped_addr.is_null() {
+            unsafe { libc::munmap(self.mapped_addr, self.mapped_len) };
+        }
+        // // write buffered lines, if any
+        // Self::flush(
+        //     &mut self.cur_buf,
+        //     &self.buf_pool,
+        //     self.io_chan.as_ref().unwrap(),
+        // )
+        // .expect("write_bytes: flush failed");
 
-        // signal worker thread to exit by dropping the sender
-        let sender = self.io_chan.take();
-        drop(sender);
+        // // signal worker thread to exit by dropping the sender
+        // let sender = self.io_chan.take();
+        // drop(sender);
 
-        // wait for worker to exit
-        self.worker
-            .take()
-            .unwrap()
-            .join()
-            .expect("drop: worker panicked");
+        // // wait for worker to exit
+        // self.worker
+        //     .take()
+        //     .unwrap()
+        //     .join()
+        //     .expect("drop: worker panicked");
     }
 }
 
