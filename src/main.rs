@@ -7,7 +7,7 @@
 #![feature(portable_simd)]
 #![feature(stdsimd_internal)]
 #![feature(stdsimd)]
-use std::{env, io};
+use std::{env, io, mem::ManuallyDrop};
 
 use iodirect::{output_file::OutputFile, sorted_file::SortedFile, ALIGN, LINE_WIDTH_INCL_NEWLINE};
 
@@ -57,18 +57,23 @@ impl SortingWriter {
     }
 
     fn write_to(&mut self, dest: &mut OutputFile) -> io::Result<()> {
-        loop {
-            let min = self
-                .0
-                .iter_mut()
-                .min_by_key(|sf| *sf.peek().unwrap_or(&u64::MAX));
+        self.0.retain_mut(|sf| sf.peek().is_some());
+        // keep smallest elements at the end so that we can easily
+        // re-arrange them
+        self.0
+            .sort_by_cached_key(|sf| std::cmp::Reverse(*sf.peek().unwrap()));
+        // self.0.sort_by_cached_key(|sf| *sf.peek().unwrap());
 
-            match min.as_ref().and_then(|min_sf| min_sf.peek_bytes()) {
-                None => break Ok(()),
-                Some(line) => {
-                    dest.write_bytes(line)?;
-                    min.unwrap().next();
-                }
+        loop {
+            // let min = self.0.iter_mut().min_by_key(|sf| *sf.peek().unwrap());
+            let min = self.0.pop();
+            let Some(mut min_sf) = min else { return Ok(()) };
+            let Some(line) = min_sf.peek_bytes() else { return Ok(()) };
+            dest.write_bytes(line)?;
+            min_sf.next();
+            if let Some(&val) = min_sf.peek() {
+                let idx = self.0.partition_point(|sf| val < *sf.peek().unwrap());
+                self.0.insert(idx, min_sf);
             }
         }
     }
