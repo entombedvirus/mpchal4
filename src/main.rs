@@ -49,28 +49,42 @@ fn main() {
     wr.write_to(&mut output).unwrap();
 }
 
-struct SortingWriter(Vec<SortedFile>);
+struct SortingWriter {
+    input_files: Vec<SortedFile>,
+    // a parallal vec to input_files that contains the top value from each SortedFile. Used to
+    // speed up comparisons to find the min value.
+    min_values: Vec<u64>,
+}
 
 impl SortingWriter {
-    fn new(sfs: Vec<SortedFile>) -> Self {
-        Self(sfs)
+    fn new(input_files: Vec<SortedFile>) -> Self {
+        let min_values = input_files
+            .iter()
+            .map(|sf| *sf.peek().unwrap_or(&u64::MAX))
+            .collect();
+        Self {
+            input_files,
+            min_values,
+        }
     }
 
     fn write_to(&mut self, dest: &mut OutputFile) -> io::Result<()> {
         loop {
-            let min = self
-                .0
-                .iter_mut()
-                .min_by_key(|sf| *sf.peek().unwrap_or(&u64::MAX));
-
-            match min.as_ref().and_then(|min_sf| min_sf.peek_bytes()) {
-                None => break Ok(()),
-                Some(line) => {
-                    dest.write_bytes(line)?;
-                    min.unwrap().next();
-                }
-            }
+            let Some(min_idx) = self.find_min_idx() else { return Ok(()) };
+            let min_sf = &mut self.input_files[min_idx];
+            let Some(line) = min_sf.peek_bytes() else { return Ok(()) };
+            dest.write_bytes(line)?;
+            min_sf.next();
+            self.min_values[min_idx] = *min_sf.peek().unwrap_or(&u64::MAX);
         }
+    }
+
+    fn find_min_idx(&self) -> Option<usize> {
+        self.min_values
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, &val)| val)
+            .map(|(idx, _)| idx)
     }
 }
 
