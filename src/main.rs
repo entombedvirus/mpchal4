@@ -11,11 +11,12 @@ use std::{
     arch::x86_64::{
         _mm256_add_epi64, _mm256_cmplt_epu64_mask, _mm256_extracti128_si256, _mm256_load_si256,
         _mm256_loadu_si256, _mm256_mask_mov_epi64, _mm256_min_epu64, _mm256_permute4x64_epi64,
-        _mm256_set1_epi64x, _mm256_set_epi64x, _mm256_setr_epi64x, _mm_cmplt_epu64_mask,
-        _mm_mask_mov_epi64,
+        _mm256_set1_epi64x, _mm256_set_epi64x, _mm256_setr_epi64x, _mm_add_epi64,
+        _mm_cmplt_epu64_mask, _mm_load_si128, _mm_mask_mov_epi64, _mm_set1_epi64x, _mm_set_epi8,
+        _mm_setr_epi8,
     },
     env, io,
-    simd::{u64x2, u64x4, usizex4, Simd, SimdOrd},
+    simd::{u64x2, u64x4, usizex2, usizex4, Simd, SimdOrd},
 };
 
 use iodirect::{output_file::OutputFile, sorted_file::SortedFile, ALIGN, LINE_WIDTH_INCL_NEWLINE};
@@ -66,7 +67,7 @@ struct SortingWriter {
 }
 
 impl SortingWriter {
-    const LANES: usize = 4;
+    const LANES: usize = 2;
 
     fn new(input_files: Vec<SortedFile>) -> Self {
         let min_values = input_files
@@ -88,6 +89,7 @@ impl SortingWriter {
     fn write_to(&mut self, dest: &mut OutputFile) -> io::Result<()> {
         loop {
             let Some(min_idx) = self.argmin2() else { return Ok(()) };
+
             let min_sf = &mut self.input_files[min_idx];
             let Some(line) = min_sf.peek_bytes() else { return Ok(()) };
             dest.write_bytes(line)?;
@@ -114,34 +116,33 @@ impl SortingWriter {
     // See: https://en.algorithmica.org/hpc/algorithms/argmin/
     fn argmin2(&self) -> Option<usize> {
         unsafe {
-            let lane_width = _mm256_set1_epi64x(Self::LANES as i64);
+            let lane_width = _mm_set1_epi64x(Self::LANES as i64);
             let mut batch_start_addr = self.min_values.as_ptr() as *const _;
 
-            let mut min_values = _mm256_load_si256(batch_start_addr);
-            let mut indices = _mm256_setr_epi64x(0, 1, 2, 3);
+            let mut min_values = _mm_load_si128(batch_start_addr);
+            let mut min_indices = _mm_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0);
+            let mut cur_indices = min_indices;
             batch_start_addr = batch_start_addr.add(1);
 
             // find lane-wise min values and their indices
             for _ in 1..self.min_values.len() {
-                let cur_values = _mm256_load_si256(batch_start_addr);
-                let cur_indices = _mm256_add_epi64(indices, lane_width);
+                let cur_values = _mm_load_si128(batch_start_addr);
+                cur_indices = _mm_add_epi64(cur_indices, lane_width);
 
-                let mask = _mm256_cmplt_epu64_mask(cur_values, min_values);
-                min_values = _mm256_mask_mov_epi64(min_values, mask, cur_values);
-                indices = _mm256_mask_mov_epi64(indices, mask, cur_indices);
+                let mask = _mm_cmplt_epu64_mask(cur_values, min_values);
+                min_values = _mm_mask_mov_epi64(min_values, mask, cur_values);
+                min_indices = _mm_mask_mov_epi64(min_indices, mask, cur_indices);
 
                 batch_start_addr = batch_start_addr.add(1);
             }
 
-            let min_values = u64x4::from(min_values);
-            let indices = usizex4::from(indices);
-            let min = *min_values.as_array().iter().min()?;
-            for idx in 0..Self::LANES {
-                if min_values[idx] == min {
-                    return Some(indices[idx]);
-                }
+            let min_values = u64x2::from(min_values);
+            let indices = usizex2::from(min_indices);
+            if min_values[0] < min_values[1] {
+                Some(indices[0])
+            } else {
+                Some(indices[1])
             }
-            unreachable!("min will be found");
             // indices
             //     .as_array()
             //     .iter()
