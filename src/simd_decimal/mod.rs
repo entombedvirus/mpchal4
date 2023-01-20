@@ -12,7 +12,8 @@ const REG_BYTES: usize = 16;
 
 pub fn parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
     inputs: &[u8],
-    outputs: &mut Vec<u64>,
+    outputs: &mut Vec<PackedVal>,
+    file_idx: u8,
 ) {
     let expected_results = inputs.len() / LINE_WIDTH;
     assert_eq!(inputs.len() % LINE_WIDTH, 0, "only pass complete lines");
@@ -27,6 +28,7 @@ pub fn parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
             do_parse_packed_4bit::<N, LINE_WIDTH>(
                 &chunk,
                 outputs.get_unchecked_mut(i..i + N).try_into().unwrap(),
+                file_idx,
             );
             i += N;
         }
@@ -38,6 +40,7 @@ pub fn parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
             do_parse_packed_4bit::<1, LINE_WIDTH>(
                 &[&buf],
                 outputs.get_unchecked_mut(i..i + 1).try_into().unwrap(),
+                file_idx,
             );
             i += 1;
         }
@@ -47,7 +50,8 @@ pub fn parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
 
 unsafe fn do_parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
     inputs: &[&[u8; REG_BYTES]; N],
-    outputs: &mut [u64; N],
+    outputs: &mut [PackedVal; N],
+    file_idx: u8,
 ) {
     let zero = _mm_set1_epi8(b'0' as i8);
     let mut cleaned = [_mm_setzero_si128(); N];
@@ -90,7 +94,7 @@ unsafe fn do_parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
         // extract the lo 64bits and swap bytes so that the most
         // significant 4bits in the right place
         let lo = _mm_cvtsi128_si64(cleaned[i]);
-        outputs[i] = lo.swap_bytes() as u64;
+        outputs[i] = PackedVal::new(lo.swap_bytes() as u64, file_idx);
     }
 }
 
@@ -141,6 +145,37 @@ impl<'a, const L: usize, const R: usize, const N: usize> Iterator for ChunkerIte
         } else {
             None
         }
+    }
+}
+
+/// PackedVal encodes a value that is parsed from the input files and the index of the SortedFile
+/// it was parsed from. The least significant byte contains the index (since there can never by
+/// more than 20 input files the file index will never be greater than 19, which will fit in a
+/// byte). The remaining 7 bytes contains each ascii byte of the original number packed into
+/// 4 bits. Since the input is always 13 digits and we have 7 bytes x 2 four-bits per byte = 14
+/// slots, one 4bit slot will be zero.
+#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone, Copy)]
+pub struct PackedVal(u64);
+impl PackedVal {
+    pub const MAX: Self = Self(u64::MAX);
+
+    pub fn new(v: u64, idx: u8) -> Self {
+        debug_assert_eq!(
+            v as u8, 0,
+            "least significant byte must be zero to pack file_idx in it"
+        );
+        Self(v | idx as u64)
+    }
+
+    #[inline]
+    pub fn file_idx(&self) -> usize {
+        // large to small integer conversion truncates
+        self.0 as u8 as usize
+    }
+
+    #[inline]
+    pub fn inner(&self) -> u64 {
+        self.0
     }
 }
 
@@ -227,7 +262,9 @@ mod tests {
             let b = _mm_cvtsi128_si64(b).swap_bytes() as u64;
             eprintln!("b\t: {:#02x}", b);
 
-            assert_eq!(0x01_23_45_67_89_12_34_00, b);
+            let packed = PackedVal::new(b, 0xCA);
+            assert_eq!(0x01_23_45_67_89_12_34_CA, packed.inner());
+            assert_eq!(0xCA, packed.file_idx());
         }
     }
 }

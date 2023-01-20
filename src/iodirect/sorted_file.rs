@@ -1,6 +1,7 @@
 use crate::{
     iodirect::{self, ALIGN},
-    simd_decimal, LINE_WIDTH_INCL_NEWLINE,
+    simd_decimal::{self, PackedVal},
+    LINE_WIDTH_INCL_NEWLINE,
 };
 use std::{
     fs,
@@ -12,8 +13,9 @@ use rustix::fs::{MetadataExt, OpenOptionsExt};
 #[derive(Debug)]
 pub struct SortedFile {
     pub file_size: u64,
+    file_idx: u8,
 
-    parsed_lines: Vec<u64>,
+    parsed_lines: Vec<PackedVal>,
     parsed_line_pos: usize,
     partial_line_bytes: usize,
 
@@ -24,7 +26,7 @@ pub struct SortedFile {
 }
 
 impl SortedFile {
-    pub fn new(file_path: &str) -> Self {
+    pub fn new(file_path: &str, file_idx: u8) -> Self {
         let reader = fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECT)
@@ -46,6 +48,7 @@ impl SortedFile {
 
         let mut ret = Self {
             file_size,
+            file_idx,
 
             parsed_lines: Vec::new(),
             parsed_line_pos: 0,
@@ -61,7 +64,7 @@ impl SortedFile {
     }
 
     #[inline]
-    pub fn peek(&self) -> Option<&u64> {
+    pub fn peek(&self) -> Option<&PackedVal> {
         self.parsed_lines.get(self.parsed_line_pos)
     }
 
@@ -113,6 +116,7 @@ impl SortedFile {
         simd_decimal::parse_packed_4bit::<6, LINE_WIDTH_INCL_NEWLINE>(
             &buf[..num_complete_lines * LINE_WIDTH_INCL_NEWLINE],
             &mut self.parsed_lines,
+            self.file_idx,
         );
 
         let n = self.partial_line_bytes;

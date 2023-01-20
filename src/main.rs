@@ -10,6 +10,7 @@
 use std::{env, io};
 
 use iodirect::{output_file::OutputFile, sorted_file::SortedFile, ALIGN, LINE_WIDTH_INCL_NEWLINE};
+use simd_decimal::PackedVal;
 
 mod iodirect;
 mod simd_decimal;
@@ -28,14 +29,15 @@ const _: () = check_consts();
 fn main() {
     let mut input_files: Vec<_> = env::args()
         .skip(1)
-        .map(|input_file| SortedFile::new(&input_file))
+        .enumerate()
+        .map(|(idx, input_file)| SortedFile::new(&input_file, idx as u8))
         .collect();
 
     // provide default inputs to make running profiler easier
     if input_files.is_empty() {
-        for pat in ["2", "4", "8", "10", "20", "40"] {
+        for (idx, pat) in ["2", "4", "8", "10", "20", "40"].iter().enumerate() {
             let path = format!("files/{pat}m.txt");
-            input_files.push(SortedFile::new(&path));
+            input_files.push(SortedFile::new(&path, idx as u8));
         }
     }
 
@@ -61,7 +63,7 @@ impl SortingWriter {
             let min = self
                 .0
                 .iter_mut()
-                .min_by_key(|sf| *sf.peek().unwrap_or(&u64::MAX));
+                .min_by_key(|sf| *sf.peek().unwrap_or(&PackedVal::MAX));
 
             match min.as_ref().and_then(|min_sf| min_sf.peek_bytes()) {
                 None => break Ok(()),
@@ -81,34 +83,42 @@ mod tests {
         io::{BufRead, BufReader},
     };
 
+    use crate::simd_decimal::PackedVal;
+
     use super::*;
 
     const FILE: &str = "files/2m.txt";
 
     #[test]
     fn test_sorted_file() {
-        let mut sf = SortedFile::new(FILE);
-        assert_eq!(Some(&0x167167017123600), sf.peek());
+        let mut sf = SortedFile::new(FILE, 0);
+        assert_eq!(Some(0x167167017123600), sf.peek().map(PackedVal::inner));
         sf.next();
-        assert_eq!(Some(&0x167167017123600), sf.peek());
+        assert_eq!(Some(0x167167017123600), sf.peek().map(PackedVal::inner));
     }
 
-    fn get_4bit_compressed(x: u64) -> u64 {
+    fn get_4bit_compressed(x: u64, file_idx: u8) -> PackedVal {
         let mut as_str = x.to_string();
         as_str += "00";
-        u64::from_str_radix(&as_str, 16).unwrap()
+        let val = u64::from_str_radix(&as_str, 16).unwrap();
+        PackedVal::new(val, file_idx)
     }
 
     #[test]
     fn test_whole_file() {
         let mut lines = stdlib_solution_iter(&[FILE]);
+        let file_idx = 19;
 
-        let mut sf = SortedFile::new(FILE);
+        let mut sf = SortedFile::new(FILE, file_idx);
         let mut n = 0;
         let mut peeked_bytes = sf.peek_bytes().cloned();
         while let Some(&actual) = sf.peek() {
             let expected = lines.next().unwrap();
-            assert_eq!(get_4bit_compressed(expected), actual, "line_idx: #{n}");
+            assert_eq!(
+                get_4bit_compressed(expected, file_idx),
+                actual,
+                "line_idx: #{n}"
+            );
             assert_eq!(
                 Ok(format!("{}\n", expected)),
                 String::from_utf8(peeked_bytes.unwrap().to_vec()),
@@ -128,7 +138,12 @@ mod tests {
         temp_file.push("mpchal4.tmp.txt");
 
         {
-            let sorted_files: Vec<_> = inputs.iter().copied().map(SortedFile::new).collect();
+            let sorted_files: Vec<_> = inputs
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(idx, f)| SortedFile::new(f, idx as u8))
+                .collect();
             let expected_file_size: usize =
                 sorted_files.iter().map(|sf| sf.file_size as usize).sum();
             let mut wr = SortingWriter::new(sorted_files);
