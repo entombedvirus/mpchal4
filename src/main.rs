@@ -78,40 +78,42 @@ impl SortingWriter {
     fn get_write_sequence(&self) -> Vec<u8> {
         let mut ret = Vec::new();
 
-        // find all the files with values remaining that we can step thru one value at a time
-        // finding the min each round
-        let mut iters: Vec<_> = self
-            .0
-            .iter()
-            .filter(|sf| sf.peek().is_some())
-            .map(|sf| sf.parsed_values().iter().peekable())
-            .collect();
-
-        loop {
-            let min_val = iters
-                .iter_mut()
-                .try_reduce(|acc, e| {
-                    // if any iter has None when peeked, that means we need to go back to disk to
-                    // fetch a new batch. Since we don't know whether the item that will be read
-                    // will be new min, bail out early
-                    let acc_top = acc.peek()?;
-                    let e_top = e.peek()?;
-                    Some(if acc_top < e_top { acc } else { e })
-                })
-                .flatten()
-                .and_then(|min_iter| min_iter.next());
-
-            match min_val {
-                None => {
-                    // self.0 is empty or all the iterators ran out
-                    break;
-                }
-                Some(pval) => {
-                    ret.push(pval.file_idx());
-                }
-            }
-        }
+        simd_decimal::compute_sequence(&self.0, &mut ret);
         ret
+        // // find all the files with values remaining that we can step thru one value at a time
+        // // finding the min each round
+        // let mut iters: Vec<_> = self
+        //     .0
+        //     .iter()
+        //     .filter(|sf| sf.peek().is_some())
+        //     .map(|sf| sf.parsed_values().iter().peekable())
+        //     .collect();
+
+        // loop {
+        //     let min_val = iters
+        //         .iter_mut()
+        //         .try_reduce(|acc, e| {
+        //             // if any iter has None when peeked, that means we need to go back to disk to
+        //             // fetch a new batch. Since we don't know whether the item that will be read
+        //             // will be new min, bail out early
+        //             let acc_top = acc.peek()?;
+        //             let e_top = e.peek()?;
+        //             Some(if acc_top < e_top { acc } else { e })
+        //         })
+        //         .flatten()
+        //         .and_then(|min_iter| min_iter.next());
+
+        //     match min_val {
+        //         None => {
+        //             // self.0 is empty or all the iterators ran out
+        //             break;
+        //         }
+        //         Some(pval) => {
+        //             ret.push(pval.file_idx());
+        //         }
+        //     }
+        // }
+        // ret
     }
 }
 

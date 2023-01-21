@@ -6,7 +6,10 @@ use std::{
     },
     io::BufRead,
     mem::MaybeUninit,
+    simd::{u64x2, Simd, SimdOrd},
 };
+
+use crate::iodirect::sorted_file::SortedFile;
 
 const REG_BYTES: usize = 16;
 
@@ -168,14 +171,20 @@ impl PackedVal {
     }
 
     #[inline]
-    pub fn file_idx(&self) -> u8 {
+    pub const fn file_idx(&self) -> u8 {
         // large to small integer conversion truncates
         self.0 as u8
     }
 
     #[inline]
-    pub fn inner(&self) -> u64 {
+    pub const fn inner(&self) -> u64 {
         self.0
+    }
+}
+
+impl From<u64> for PackedVal {
+    fn from(value: u64) -> Self {
+        Self(value)
     }
 }
 
@@ -265,6 +274,46 @@ mod tests {
             let packed = PackedVal::new(b, 0xCA);
             assert_eq!(0x01_23_45_67_89_12_34_CA, packed.inner());
             assert_eq!(0xCA, packed.file_idx());
+        }
+    }
+}
+
+pub fn compute_sequence(inputs: &[SortedFile], outputs: &mut Vec<u8>) {
+    const N: usize = 2;
+
+    let mut iters: Vec<_> = inputs
+        .iter()
+        .map(|sf| sf.parsed_values().iter().peekable())
+        .collect();
+
+    while iters.len() % N != 0 {
+        iters.push((&[]).iter().peekable());
+    }
+
+    let mut regs: Vec<_> = iters
+        .iter_mut()
+        .map(|iter| iter.peek().unwrap_or(&&PackedVal::MAX).inner())
+        .array_chunks()
+        .map(<Simd<u64, N>>::from_array)
+        .collect();
+
+    loop {
+        let Some(min_reg) = regs.iter().copied().reduce(|acc, e| acc.simd_min(e)) else { return };
+        let Some(&min_val) = min_reg.as_array().iter().min() else { return };
+        let pval: PackedVal = min_val.into();
+        if pval == PackedVal::MAX {
+            // all inputs have been exhausted
+            break;
+        }
+        outputs.push(pval.file_idx());
+        let idx = pval.file_idx() as usize;
+        iters[idx].next();
+        if let Some(new_pval) = iters[idx].peek() {
+            regs[idx / N][idx % N] = new_pval.inner();
+        } else {
+            // one input batch has been exhausted. Since we can't compute a new minimum
+            // until the next batch from disk is fetched, bail early
+            break;
         }
     }
 }
