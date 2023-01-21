@@ -168,9 +168,9 @@ impl PackedVal {
     }
 
     #[inline]
-    pub fn file_idx(&self) -> usize {
+    pub fn file_idx(&self) -> u8 {
         // large to small integer conversion truncates
-        self.0 as u8 as usize
+        self.0 as u8
     }
 
     #[inline]

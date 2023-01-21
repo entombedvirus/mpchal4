@@ -64,6 +64,11 @@ impl SortedFile {
     }
 
     #[inline]
+    pub fn parsed_values(&self) -> &[PackedVal] {
+        &self.parsed_lines[self.parsed_line_pos..]
+    }
+
+    #[inline]
     pub fn peek(&self) -> Option<&PackedVal> {
         self.parsed_lines.get(self.parsed_line_pos)
     }
