@@ -6,7 +6,7 @@ use std::{
     },
     io::BufRead,
     mem::MaybeUninit,
-    simd::{u64x2, Simd, SimdOrd},
+    simd::{u64x2, Simd, SimdOrd, SimdUint},
 };
 
 use crate::iodirect::sorted_file::SortedFile;
@@ -279,41 +279,46 @@ mod tests {
 }
 
 pub fn compute_sequence(inputs: &[SortedFile], outputs: &mut Vec<u8>) {
-    const N: usize = 2;
+    const N: usize = 4;
 
+    outputs.clear();
     let mut iters: Vec<_> = inputs
         .iter()
-        .map(|sf| sf.parsed_values().iter().peekable())
+        .map(|sf| sf.parsed_values().into_iter())
         .collect();
 
     while iters.len() % N != 0 {
-        iters.push((&[]).iter().peekable());
+        iters.push((&[]).iter());
     }
 
     let mut regs: Vec<_> = iters
         .iter_mut()
-        .map(|iter| iter.peek().unwrap_or(&&PackedVal::MAX).inner())
+        .map(|iter| iter.next().unwrap_or(&&PackedVal::MAX).inner())
         .array_chunks()
         .map(<Simd<u64, N>>::from_array)
         .collect();
 
     loop {
         let Some(min_reg) = regs.iter().copied().reduce(|acc, e| acc.simd_min(e)) else { return };
-        let Some(&min_val) = min_reg.as_array().iter().min() else { return };
-        let pval: PackedVal = min_val.into();
+        let pval: PackedVal = min_reg.as_array().iter().copied().min().unwrap().into();
         if pval == PackedVal::MAX {
             // all inputs have been exhausted
             break;
         }
         outputs.push(pval.file_idx());
         let idx = pval.file_idx() as usize;
-        iters[idx].next();
-        if let Some(new_pval) = iters[idx].peek() {
-            regs[idx / N][idx % N] = new_pval.inner();
-        } else {
-            // one input batch has been exhausted. Since we can't compute a new minimum
-            // until the next batch from disk is fetched, bail early
-            break;
+        unsafe {
+            // SAFETY: idx is guaranteed to be within bounds because of how we pack
+            // the file_idx into the last byte during parsing
+            if let Some(new_pval) = iters.get_unchecked_mut(idx).next() {
+                // SAFETY: idx/N is guaranteed to be within bounds because how we pack N elements
+                // into each register
+                regs.get_unchecked_mut(idx / N)[idx % N] = new_pval.inner();
+            } else {
+                // one input batch has been exhausted. Since we can't compute a new minimum
+                // until the next batch from disk is fetched, bail early
+                break;
+            }
         }
     }
 }

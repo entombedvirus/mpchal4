@@ -11,7 +11,6 @@
 use std::{env, io};
 
 use iodirect::{output_file::OutputFile, sorted_file::SortedFile, ALIGN, LINE_WIDTH_INCL_NEWLINE};
-use simd_decimal::PackedVal;
 
 mod iodirect;
 mod simd_decimal;
@@ -52,22 +51,28 @@ fn main() {
     wr.write_to(&mut output).unwrap();
 }
 
-struct SortingWriter(Vec<SortedFile>);
+struct SortingWriter {
+    sorted_files: Vec<SortedFile>,
+    sequence: Vec<u8>,
+}
 
 impl SortingWriter {
     fn new(sfs: Vec<SortedFile>) -> Self {
-        Self(sfs)
+        Self {
+            sorted_files: sfs,
+            sequence: vec![],
+        }
     }
 
     fn write_to(&mut self, dest: &mut OutputFile) -> io::Result<()> {
         loop {
-            let seq = self.get_write_sequence();
-            if seq.is_empty() {
+            simd_decimal::compute_sequence(&self.sorted_files, &mut self.sequence);
+            if self.sequence.is_empty() {
                 return Ok(());
             }
 
-            for idx in seq {
-                let min_sf = &mut self.0[idx as usize];
+            for &idx in &self.sequence {
+                let min_sf = &mut self.sorted_files[idx as usize];
                 let line = min_sf.peek_bytes().unwrap();
                 dest.write_bytes(line)?;
                 min_sf.next();
@@ -75,46 +80,42 @@ impl SortingWriter {
         }
     }
 
-    fn get_write_sequence(&self) -> Vec<u8> {
-        let mut ret = Vec::new();
+    // fn get_write_sequence(&mut self) -> Vec<u8> {
+    // // find all the files with values remaining that we can step thru one value at a time
+    // // finding the min each round
+    // let mut iters: Vec<_> = self
+    //     .0
+    //     .iter()
+    //     .filter(|sf| sf.peek().is_some())
+    //     .map(|sf| sf.parsed_values().iter().peekable())
+    //     .collect();
 
-        simd_decimal::compute_sequence(&self.0, &mut ret);
-        ret
-        // // find all the files with values remaining that we can step thru one value at a time
-        // // finding the min each round
-        // let mut iters: Vec<_> = self
-        //     .0
-        //     .iter()
-        //     .filter(|sf| sf.peek().is_some())
-        //     .map(|sf| sf.parsed_values().iter().peekable())
-        //     .collect();
+    // loop {
+    //     let min_val = iters
+    //         .iter_mut()
+    //         .try_reduce(|acc, e| {
+    //             // if any iter has None when peeked, that means we need to go back to disk to
+    //             // fetch a new batch. Since we don't know whether the item that will be read
+    //             // will be new min, bail out early
+    //             let acc_top = acc.peek()?;
+    //             let e_top = e.peek()?;
+    //             Some(if acc_top < e_top { acc } else { e })
+    //         })
+    //         .flatten()
+    //         .and_then(|min_iter| min_iter.next());
 
-        // loop {
-        //     let min_val = iters
-        //         .iter_mut()
-        //         .try_reduce(|acc, e| {
-        //             // if any iter has None when peeked, that means we need to go back to disk to
-        //             // fetch a new batch. Since we don't know whether the item that will be read
-        //             // will be new min, bail out early
-        //             let acc_top = acc.peek()?;
-        //             let e_top = e.peek()?;
-        //             Some(if acc_top < e_top { acc } else { e })
-        //         })
-        //         .flatten()
-        //         .and_then(|min_iter| min_iter.next());
-
-        //     match min_val {
-        //         None => {
-        //             // self.0 is empty or all the iterators ran out
-        //             break;
-        //         }
-        //         Some(pval) => {
-        //             ret.push(pval.file_idx());
-        //         }
-        //     }
-        // }
-        // ret
-    }
+    //     match min_val {
+    //         None => {
+    //             // self.0 is empty or all the iterators ran out
+    //             break;
+    //         }
+    //         Some(pval) => {
+    //             ret.push(pval.file_idx());
+    //         }
+    //     }
+    // }
+    // ret
+    // }
 }
 
 #[cfg(test)]
