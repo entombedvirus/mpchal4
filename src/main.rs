@@ -58,16 +58,16 @@ impl SortingWriter {
 
     fn write_to(&mut self, dest: &mut OutputFile) -> io::Result<()> {
         loop {
-            let min = self
+            let Some(min_sf) = self
                 .0
                 .iter_mut()
-                .min_by_key(|sf| *sf.peek().unwrap_or(&u64::MAX));
+                .min_by_key(|sf| *sf.peek().unwrap_or(&u64::MAX)) else { return Ok(()) };
 
-            match min.as_ref().and_then(|min_sf| min_sf.peek_bytes()) {
+            match min_sf.peek_bytes() {
                 None => break Ok(()),
                 Some(line) => {
                     dest.write_bytes(line)?;
-                    min.unwrap().next();
+                    min_sf.next();
                 }
             }
         }
