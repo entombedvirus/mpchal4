@@ -69,7 +69,7 @@ unsafe fn do_parse_packed_4bit<const N: usize, const LINE_WIDTH: usize>(
         // shift left by 4bits so that we can do a logical OR
         // to pack together 2 bytes into 1 byte
         let b = _mm_slli_epi16(cleaned[i], 4);
-        // shift right by 1 byte so that things line up to do
+        // shift left by 1 byte so that things line up to do
         // the OR operation
         let b = _mm_slli_si128(b, 1);
         // do the OR operation such that two adjacent bytes
@@ -103,7 +103,7 @@ impl<'a, const L: usize, const R: usize, const N: usize> ChunkerIter<'a, L, R, N
         assert!(L <= R, "line cannot be longer than register width");
         assert!(
             slice.len() % L == 0,
-            "parse_decimals can only handle complete lines"
+            "parse_decimal: ChunkIter can only handle complete lines"
         );
         Self { slice }
     }

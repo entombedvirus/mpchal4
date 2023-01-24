@@ -14,17 +14,51 @@ use iodirect::{output_file::OutputFile, sorted_file::SortedFile, ALIGN, LINE_WID
 mod iodirect;
 mod simd_decimal;
 
-// Flagged as dead code unfortunately
-#[allow(dead_code)]
-const fn check_consts() {
-    assert!(
-        ALIGN >= LINE_WIDTH_INCL_NEWLINE,
-        "align size has to be atleast as big as one line to deal with parsing partial lines"
-    )
-}
-
-const _: () = check_consts();
-
+// The main strategies involved in this solution are:
+//
+// 1. Skipping linux pagecache by using O_DIRECT when reading inputs and not skipping it when writing
+// 2. Using SIMD to parse 4bit packed numbers for improve throughput
+// 3. Using a single IO thread to do the actual blocking IO while the main thread does everything
+//    else.
+//
+// When reading the input files, we can minimize the amount of system cpu by using O_DIRECT mode
+// and skipping the page cache. Since we can get away with reading the inputs only once, the CPU
+// time spent by the kernel maintaining the page cache is not worth it. However, the opposite is
+// true when we are writing out the merged file: only writing to the page cache allows the program
+// to only block for the time necessary to write to page cache and not the actual SSD. This allows
+// us to have maximum ROI in terms of kernel / system cpu.
+//
+// After reading the inputs, in order to figure out which number to write next, we have to compare
+// the top value from each input to find the minimum. Since all numbers are guaranteed to be 13
+// digits, we could simply compare the ascii bytes without parsing it into a binary number. However,
+// doing memcmp on 13 bytes repeatedly takes more cpu than parsing the ascii number into a binary
+// number once and then using that number for comparisons. Using a data structure like a min-heap
+// turned out to be more expensive when compared to doing a linear search for the new minimum for
+// small number of input files, which is guaranteed to not exceed 20.
+//
+// The cpu cycles it takes to parse an ascii number to a binary u64 can be improved by using SIMD
+// instructions: i.e instead of parsing each ascii digit individually, load all 13 digits into a
+// single vector register and apply each step involved in parsing across each digit in the same CPU
+// clock cycle. This solution takes this approach a bit further by exploiting the fact that we
+// don't need to do any arithmetic on this parsed number; all we need is to be able to compare them
+// to figure out the minimum. So is there a way to parse the numbers in such a way that we don't
+// spend as cpu parsing them, but still gives the same result when comparing?
+//
+// Turns out the answer is yes. It works by compressing each ascii digit, which are 8 bits each, to
+// take only 4 bits and the reversing the order such that the most significant digit ends up being
+// in the most significant position. For example:
+// - start with the ascii number "1234"
+// - represented as array of bytes, this is equivalent to [0x31, 0x32, 0x33, 0x34]
+// - subtract ascii '0' from each byte so that we get:    [0x1, 0x2, 0x3, 0x4]
+// - since the max possible legal value is 0x9, which fits within 4 bits, we can pack
+//   two digits into every byte: [0x12, 0x34]
+// - since "12" appears in the most significant positions in the original number, we need to
+//   reverse the order in the byte array so that when comparing numbers, "1234" will be smaller
+//   than "1235": [0x34, 0x12]
+//
+//   Similar to normal parsing of ascii numbers to binary numbers, this 4bit packed parsing can
+//   also be done via SIMD instructions. See: do_parse_packed_4bit in the simd_decimal module to
+//   see the full implementation.
 fn main() {
     let mut input_files: Vec<_> = env::args()
         .skip(1)
@@ -170,3 +204,14 @@ mod tests {
         res.into_iter()
     }
 }
+
+// Flagged as dead code unfortunately
+#[allow(dead_code)]
+const fn check_consts() {
+    assert!(
+        ALIGN >= LINE_WIDTH_INCL_NEWLINE,
+        "align size has to be atleast as big as one line to deal with parsing partial lines"
+    )
+}
+
+const _: () = check_consts();
